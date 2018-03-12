@@ -16,7 +16,7 @@ def run_loop(agent, env, num_episodes=0, max_agent_steps=0):
             timesteps = env.reset()
             agent.reset()
 
-            if total_episodes >= num_episodes:
+            if num_episodes != 0 and total_episodes >= num_episodes:
                 print("Reached max episodes")
                 break
 
@@ -24,7 +24,7 @@ def run_loop(agent, env, num_episodes=0, max_agent_steps=0):
                 timestep = timesteps[0]
                 action = agent.step(timestep)
 
-                is_done = (agent.steps >= max_agent_steps) or timestep.last()
+                is_done = (max_agent_steps != 0 and agent.steps >= max_agent_steps) or timestep.last()
                 yield [action, timestep], is_done
                 if is_done:
                     break

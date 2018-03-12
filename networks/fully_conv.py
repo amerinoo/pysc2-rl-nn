@@ -3,13 +3,10 @@ import tensorflow.contrib.layers as layers
 
 import util
 
+
 class FullyConv(object):
     def __init__(self, m_size, s_size, num_action):
-        self.features = {
-            "minimap": None,
-            "screen": None,
-            "info": None
-        }
+        self.features = {}
 
         # Make sure that screen resolution is equal to minimap resolution
         assert(m_size == s_size)
@@ -26,53 +23,53 @@ class FullyConv(object):
 
         # Minimap convolutions
         m_preprocess = layers.conv2d(tf.transpose(self.features["minimap"], [0, 2, 3, 1]),
-                             num_outputs=1,
-                             kernel_size=1,
-                             stride=1,
-                             padding="SAME",
-                             scope="m_preprocess")
+                                     num_outputs=1,
+                                     kernel_size=1,
+                                     stride=1,
+                                     padding="SAME",
+                                     scope="m_preprocess")
 
         m_conv1 = layers.conv2d(m_preprocess,
-                               num_outputs=16,
-                               kernel_size=5,
-                               stride=1,
-                               padding="SAME",
-                               scope="m_conv1")
+                                num_outputs=16,
+                                kernel_size=5,
+                                stride=1,
+                                padding="SAME",
+                                scope="m_conv1")
 
         m_conv2 = layers.conv2d(m_conv1,
-                               num_outputs=32,
-                               kernel_size=3,
-                               stride=1,
-                               padding="SAME",
-                               scope="m_conv2")
+                                num_outputs=32,
+                                kernel_size=3,
+                                stride=1,
+                                padding="SAME",
+                                scope="m_conv2")
 
         # Screen convolutions
         s_preprocess = layers.conv2d(tf.transpose(self.features["screen"], [0, 2, 3, 1]),
-                             num_outputs=1,
-                             kernel_size=1,
-                             stride=1,
-                             padding="SAME",
-                             scope="s_preprocess")
+                                     num_outputs=1,
+                                     kernel_size=1,
+                                     stride=1,
+                                     padding="SAME",
+                                     scope="s_preprocess")
 
         s_conv1 = layers.conv2d(s_preprocess,
-                               num_outputs=16,
-                               kernel_size=5,
-                               stride=1,
-                               padding="SAME",
-                               scope="s_conv1")
+                                num_outputs=16,
+                                kernel_size=5,
+                                stride=1,
+                                padding="SAME",
+                                scope="s_conv1")
 
         s_conv2 = layers.conv2d(s_conv1,
-                               num_outputs=32,
-                               kernel_size=3,
-                               stride=1,
-                               padding="SAME",
-                               scope="s_conv2")
+                                num_outputs=32,
+                                kernel_size=3,
+                                stride=1,
+                                padding="SAME",
+                                scope="s_conv2")
 
         # Create the state representation by concatenating on the channel axis
         state_representation = tf.concat([
             m_conv2,
             s_conv2,
-            tf.reshape(self.features["info"], [-1, self.m_size, self.s_size, 1])
+            tf.reshape(self.features["info"], [-1, self.s_size, self.s_size, 1])
         ], axis=3)
 
         # Perform another convolution, but preserve the dimensions by using params(1, 1, 1)
@@ -89,9 +86,10 @@ class FullyConv(object):
         feat_fc = layers.fully_connected(layers.flatten(state_representation),
                                          num_outputs=256,
                                          activation_fn=tf.nn.relu,
+                                         weights_initializer=util.normalized_columns_initializer(1.0),
                                          scope='feat_fc')
 
-        non_spatial_action = layers.fully_connected(state_representation,
+        non_spatial_action = layers.fully_connected(feat_fc,
                                                     num_outputs=self.num_action,
                                                     activation_fn=tf.nn.softmax,
                                                     weights_initializer=util.normalized_columns_initializer(1.0),
