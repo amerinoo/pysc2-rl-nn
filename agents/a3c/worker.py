@@ -10,7 +10,7 @@ from pysc2.lib import actions
 
 import util
 
-from run_loop import run_loop
+from runner import Runner
 
 from absl import flags
 
@@ -252,18 +252,18 @@ class Worker(BaseAgent):
         self.episodes += 1
         self.epsilon = [0.3, 0.3]
 
-    def run(self, coord, t_max):
+    def run(self, coord, max_update_steps):
         env = self.env_fn()
+        runner = Runner(self, env, max_update_steps)
 
         with self.session.as_default(), self.session.graph.as_default():
             # counter = 0
-
             try:
                 while not coord.should_stop():
                     # for recorder, is_done in self.run_n_steps(t_max):
                     #     pass
                     #replay_buffer = []
-                    for recorder, is_done in run_loop(self, env, FLAGS.num_episodes, FLAGS.max_steps):
+                    for recorder, is_done in runner.run_n_steps():
                         pass
                     #    if FLAGS.training:
                     #        replay_buffer.append(recorder)
@@ -285,10 +285,6 @@ class Worker(BaseAgent):
                         env.save_replay(self.name)
             except tf.errors.CancelledError:
                 return
-
-    def run_n_steps(self, n):
-        for _ in range(n):
-            pass
 
     def step(self, obs):
         minimap = np.array(obs.observation['minimap'], dtype=np.float32)
