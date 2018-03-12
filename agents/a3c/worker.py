@@ -17,8 +17,10 @@ from absl import flags
 FLAGS = flags.FLAGS
 SNAPSHOT_PATH = FLAGS.snapshot_path + FLAGS.map + '/' + FLAGS.agent
 
+
 class Worker(BaseAgent):
     def __init__(self,
+                 scope,
                  name,
                  env_fn,
                  reuse,
@@ -30,22 +32,26 @@ class Worker(BaseAgent):
                  policy_net,
                  value_net,
                  core_net,
-                 global_counter,
+                 global_step_counter,
+                 global_episode_counter,
                  map_name,
                  discount_factor=0.99,
                  summary_writer=None,
-                 max_global_steps=None):
+                 max_global_steps=0,
+                 max_global_episodes=0):
 
         super().__init__()
+        self.scope = scope
         self.name = name
         self.env_fn = env_fn
         self.discount_factor = discount_factor
         self.max_global_steps = max_global_steps
+        self.max_global_episodes = max_global_episodes
         self.global_step = tf.train.get_global_step()
         self.global_policy_net = policy_net
         self.global_value_net = value_net
-        self.global_counter = global_counter
-        self.local_counter = itertools.count()
+        self.global_step_counter = global_step_counter
+        self.global_episode_counter = global_episode_counter
 
         self.device = device
         self.session = session
@@ -142,8 +148,9 @@ class Worker(BaseAgent):
         non_spatial_action_prob = tf.reduce_sum(self.net_output["non_spatial"] * self.targets["non_spatial"], axis=1)
 
         # Sum over non_spatial policy * non_spatial mask
-        valid_non_spatial_action_prob = tf.reduce_sum(self.net_output["non_spatial"] * self.valid_actions["non_spatial"],
-                                                      axis=1)
+        valid_non_spatial_action_prob = tf.reduce_sum(
+            self.net_output["non_spatial"] * self.valid_actions["non_spatial"],
+            axis=1)
 
         # Clip valid non_spatial action probabilities
         valid_non_spatial_action_prob = tf.clip_by_value(valid_non_spatial_action_prob, 1e-10, 1.)
@@ -250,39 +257,59 @@ class Worker(BaseAgent):
 
     def reset(self):
         self.episodes += 1
+        self.steps = 0
         self.epsilon = [0.3, 0.3]
 
-    def run(self, coord, max_update_steps):
+    def run(self, coord, max_update_steps, max_local_steps):
         env = self.env_fn()
-        runner = Runner(self, env, max_update_steps)
+        runner = Runner(self, env, max_update_steps, max_local_steps, self.max_global_steps)
 
         with self.session.as_default(), self.session.graph.as_default():
-            # counter = 0
+            is_session_done = False
+            global_episode = 0
+
             try:
                 while not coord.should_stop():
-                    # for recorder, is_done in self.run_n_steps(t_max):
-                    #     pass
-                    #replay_buffer = []
-                    for recorder, is_done in runner.run_n_steps():
-                        pass
-                    #    if FLAGS.training:
-                    #        replay_buffer.append(recorder)
-                            # if is_done:
-                            #     counter += 1
-                            #     # Learning rate schedule
-                            #     learning_rate = FLAGS.learning_rate * (1 - 0.9 * counter / FLAGS.max_steps)
-                            #     agent.update(replay_buffer, FLAGS.discount, learning_rate, counter)
-                            #     replay_buffer = []
-                            #     if counter % FLAGS.snapshot_step == 1:
-                            #         agent.save_model(SNAPSHOT_PATH, counter)
-                            #     if counter >= FLAGS.num_episodes:
-                            #         break
-                        # elif is_done:
-                        #     obs = recorder[-1].observation
-                        #     score = obs["score_cumulative"][0]
-                        #     print('Your score is ' + str(score) + '!')
-                    if FLAGS.save_replay:
-                        env.save_replay(self.name)
+                    # Collect some experience
+                    replay_buffer = []
+                    for recorder, is_done, global_step in runner.run_n_steps(self.global_step_counter):
+                        if is_done:
+                            global_episode = next(self.global_episode_counter)
+                            print("{} - Global episode: {}".format(self.name, global_episode))
+
+                        # If global max steps reached or global max episodes reached, terminate session
+                        if self.max_global_steps != 0 and global_step >= self.max_global_steps:
+                            print("Reached max global step {}".format(global_step))
+                            is_session_done = True
+                        elif self.max_global_episodes != 0 and global_episode >= self.max_global_episodes:
+                            print("Reached max global episodes {}".format(global_episode))
+                            is_session_done = True
+                        if is_session_done:
+                            coord.request_stop()
+                            return
+                        # if FLAGS.training:
+                        #     replay_buffer += recorder
+                        #     if is_done:
+                        #         pass
+                        #     #     counter += 1
+                        #     #     # Learning rate schedule
+                        #     #     learning_rate = FLAGS.learning_rate * (1 - 0.9 * counter / FLAGS.max_steps)
+                        #     #     agent.update(replay_buffer, FLAGS.discount, learning_rate, counter)
+                        #     #     replay_buffer = []
+                        #     #     if counter % FLAGS.snapshot_step == 1:
+                        #     #         agent.save_model(SNAPSHOT_PATH, counter)
+                        #     #     if counter >= FLAGS.num_episodes:
+                        #     #         break
+                        # # elif is_done:
+                        # #     obs = recorder[-1].observation
+                        # #     score = obs["score_cumulative"][0]
+                        # #     print('Your score is ' + str(score) + '!')
+                        # if is_done and FLAGS.save_replay:
+                        #     env.save_replay(self.name)
+                        #     global_episode = next(self.global_episode_counter)
+                        #     if self.max_global_steps != 0 and global_episode >= self.max_global_steps:
+                        #         coord.request_stop()
+                        #         return
             except tf.errors.CancelledError:
                 return
 
@@ -346,6 +373,7 @@ class Worker(BaseAgent):
             else:
                 act_args.append([0])
 
+        self.steps += 1
         return actions.FunctionCall(act_id, act_args)
 
     def update(self, replay_buffer, discount, learning_rate, counter):
@@ -424,14 +452,14 @@ class Worker(BaseAgent):
 
         # Train
         feed_dict = {self.features["minimap"]: minimaps,
-                self.features["screen"]: screens,
-                self.features["info"]: infos,
-                self.targets["value"]: value_target,
-                self.valid_actions["spatial"]: valid_spatial_action,
-                self.targets["spatial"]: spatial_action_selected,
-                self.valid_actions["non_spatial"]: valid_non_spatial_action,
-                self.targets["non_spatial"]: non_spatial_action_selected,
-                self.learning_rate: learning_rate}
+                     self.features["screen"]: screens,
+                     self.features["info"]: infos,
+                     self.targets["value"]: value_target,
+                     self.valid_actions["spatial"]: valid_spatial_action,
+                     self.targets["spatial"]: spatial_action_selected,
+                     self.valid_actions["non_spatial"]: valid_non_spatial_action,
+                     self.targets["non_spatial"]: non_spatial_action_selected,
+                     self.learning_rate: learning_rate}
 
         if self.summary_writer is not None:
             _, summary = self.session.run([self.train_op, self.summary_op], feed_dict=feed_dict)

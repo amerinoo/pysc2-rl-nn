@@ -60,8 +60,9 @@ class A3CAgent(base_agent.BaseAgent):
                 policy_net = None
                 value_net = None
 
-            # Global step iterator
-            global_counter = itertools.count()
+            # Global iterators
+            global_step_counter = itertools.count()
+            global_episode_counter = itertools.count()
 
             # Create worker graphs
             for worker_id in range(worker_count):
@@ -70,7 +71,8 @@ class A3CAgent(base_agent.BaseAgent):
                     worker_summary_writer = self.summary_writer
 
                 worker = Worker(reuse=worker_id > 0,
-                                name=self.name,
+                                scope=self.name,
+                                name="{}_{}".format(self.name, worker_id),
                                 env_fn=self._make_env,
                                 device=device[worker_id%len(device)],
                                 session=self.session,
@@ -80,11 +82,13 @@ class A3CAgent(base_agent.BaseAgent):
                                 policy_net=policy_net,
                                 value_net=value_net,
                                 core_net=self.network_name,
-                                global_counter=global_counter,
+                                global_step_counter=global_step_counter,
+                                global_episode_counter=global_episode_counter,
+                                map_name=self.map_name,
                                 discount_factor=FLAGS.discount,
                                 summary_writer=worker_summary_writer,
                                 max_global_steps=FLAGS.max_global_steps,
-                                map_name=self.map_name)
+                                max_global_episodes=FLAGS.num_episodes)
                 self.workers.append(worker)
 
             self.session.run(tf.global_variables_initializer())
@@ -101,7 +105,7 @@ class A3CAgent(base_agent.BaseAgent):
             # Start worker threads
             threads = []
             for worker in self.workers:
-                worker_fn = lambda worker=worker: worker.run(coord, FLAGS.max_t)
+                worker_fn = lambda worker=worker: worker.run(coord, FLAGS.max_update_steps, FLAGS.max_steps)
                 t = threading.Thread(target=worker_fn)
                 threads.append(t)
                 t.daemon = True
