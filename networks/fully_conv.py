@@ -1,7 +1,8 @@
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
-
 import util
+import logging
+logging.basicConfig(level=logging.INFO)
 
 
 class FullyConv(object):
@@ -16,9 +17,12 @@ class FullyConv(object):
         self.num_action = num_action
 
     def init_inputs(self, features):
+        logging.info("Initialising inputs...")
         self.features = features
+        logging.info("Inputs initialized!")
 
     def build(self):
+        logging.info("Building network...")
         # Extract features while preserving the dimensions
 
         # Minimap convolutions
@@ -81,7 +85,8 @@ class FullyConv(object):
                                               weights_initializer=util.normalized_columns_initializer(1.0),
                                               scope='spatial_feat')
 
-        spatial_action = tf.nn.softmax(layers.flatten(spatial_action_policy))
+        # spatial_action policy
+        spatial_action_policy_flattened = tf.nn.softmax(layers.flatten(spatial_action_policy))
 
         feat_fc = layers.fully_connected(layers.flatten(state_representation),
                                          num_outputs=256,
@@ -89,18 +94,21 @@ class FullyConv(object):
                                          weights_initializer=util.normalized_columns_initializer(1.0),
                                          scope='feat_fc')
 
+        # non_spatial_action policy
         non_spatial_action = layers.fully_connected(feat_fc,
                                                     num_outputs=self.num_action,
                                                     activation_fn=tf.nn.softmax,
                                                     weights_initializer=util.normalized_columns_initializer(1.0),
                                                     scope='non_spatial_action')
 
+        # Value
         value = layers.fully_connected(feat_fc,
                                        num_outputs=1,
                                        activation_fn=None,
                                        weights_initializer=util.normalized_columns_initializer(1.0),
                                        scope='value')
 
-        return {"spatial": spatial_action,
+        logging.info("Network built!")
+        return {"spatial": spatial_action_policy_flattened,
                 "non_spatial": non_spatial_action,
                 "value": value}

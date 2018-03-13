@@ -1,6 +1,4 @@
-import importlib
-import itertools
-import math
+import logging
 
 import tensorflow as tf
 import numpy as np
@@ -14,13 +12,14 @@ from runner import Runner
 
 from absl import flags
 
+logging.basicConfig(level=logging.INFO)
+
 FLAGS = flags.FLAGS
 SNAPSHOT_PATH = FLAGS.snapshot_path + FLAGS.map + '/' + FLAGS.agent
 
 
 class Worker(BaseAgent):
     def __init__(self,
-                 scope,
                  name,
                  env_fn,
                  reuse,
@@ -29,9 +28,8 @@ class Worker(BaseAgent):
                  is_training,
                  m_size,
                  s_size,
-                 policy_net,
-                 value_net,
-                 core_net,
+                 global_net,
+                 local_net,
                  global_step_counter,
                  global_episode_counter,
                  map_name,
@@ -41,15 +39,13 @@ class Worker(BaseAgent):
                  max_global_episodes=0):
 
         super().__init__()
-        self.scope = scope
         self.name = name
         self.env_fn = env_fn
         self.discount_factor = discount_factor
         self.max_global_steps = max_global_steps
         self.max_global_episodes = max_global_episodes
         self.global_step = tf.train.get_global_step()
-        self.global_policy_net = policy_net
-        self.global_value_net = value_net
+        self.global_net = global_net
         self.global_step_counter = global_step_counter
         self.global_episode_counter = global_episode_counter
 
@@ -65,13 +61,12 @@ class Worker(BaseAgent):
         # Dimensions
         self.m_size = m_size
         self.s_size = s_size
-        self.i_size = len(actions.FUNCTIONS)
 
         # Network
-        self.network = self._init_network(core_net)
+        self.network = util.init_network(local_net, self.m_size, self.s_size, len(actions.FUNCTIONS))
         self.net_output = {}
 
-        self.epsilon = [0.1, 0.3]
+        # self.epsilon = 0.05
 
         # Tensor dictionaries
         self.features = {}
@@ -89,29 +84,29 @@ class Worker(BaseAgent):
         self._build_model(reuse, device)
 
     def _build_model(self, reuse, device):
-        with tf.variable_scope(self.name) and tf.device(device):
+        with tf.variable_scope("shared") and tf.device(device):
             if reuse:
                 tf.get_variable_scope().reuse_variables()
                 assert tf.get_variable_scope().reuse
 
             # Build the network
-            self.features = self._init_inputs()
+            self.features = self._init_input_placeholders()
             self.network.init_inputs(self.features)
             self.net_output = self.network.build()
 
             # Initialize placeholders for masks and targets
-            self.valid_actions = self._init_valid_actions()
-            self.targets = self._init_target_actions()
+            self.valid_actions = self._init_valid_action_placeholders()
+            self.targets = self._init_target_placeholders()
 
             # Compute losses
             action_log_probs = self._compute_log_probability()
             advantage = self._compute_advantage()
+            weighted_entropy = self._compute_weighted_entropy(action_log_probs, B=0.01)
 
             policy_loss = self._compute_policy_loss(action_log_probs, advantage)
             value_loss = self._compute_value_loss(advantage)
 
-            # ToDo: entropy regularization
-            loss = policy_loss + value_loss
+            loss = policy_loss + value_loss + weighted_entropy
             if self.summary_writer is not None:
                 self.summary.append(tf.summary.scalar('loss', loss))
 
@@ -138,6 +133,11 @@ class Worker(BaseAgent):
 
         if self.summary_writer is not None:
             self.summary_op = tf.summary.merge(self.summary)
+
+    def _compute_weighted_entropy(self, action_log_probs, B):
+        spatial_entropy = -tf.reduce_sum(tf.reduce_sum(self.net_output["spatial"], axis=1) * action_log_probs["spatial"])
+        non_spatial_entropy = -tf.reduce_sum(tf.reduce_sum(self.net_output["non_spatial"], axis=1) * action_log_probs["non_spatial"])
+        return B * (spatial_entropy + non_spatial_entropy)
 
     def _compute_log_probability(self):
         # Log of Sum over spatial policy * target
@@ -175,7 +175,6 @@ class Worker(BaseAgent):
         # -log(Policy) * advantage - B*Entropy(policy)
         action_log_prob = self.valid_actions["spatial"] * action_log_probs["spatial"] + action_log_probs["non_spatial"]
 
-        # TODO: Entropy regularization
         policy_loss = -tf.reduce_mean(action_log_prob * advantage)
         if self.summary_writer is not None:
             self.summary.append(tf.summary.scalar('policy_loss', policy_loss))
@@ -191,24 +190,16 @@ class Worker(BaseAgent):
 
         return value_loss
 
-    def _init_inputs(self):
+    def _init_input_placeholders(self):
         return {
-            "minimap": tf.placeholder(tf.float32, [None, util.minimap_channel(), self.m_size, self.m_size],
+            "minimap": tf.placeholder(tf.float32, [None, util.minimap_channel_size(), self.m_size, self.m_size],
                                       name='m_feats'),
-            "screen": tf.placeholder(tf.float32, [None, util.screen_channel(), self.s_size, self.s_size],
+            "screen": tf.placeholder(tf.float32, [None, util.screen_channel_size(), self.s_size, self.s_size],
                                      name='s_feats'),
-
-            # TODO: This is likely incorrect
-            "info": tf.placeholder(tf.float32, [None, self.s_size * self.s_size], name='i_feats')
+            "info": tf.placeholder(tf.float32, [None, util.structured_channel_size()], name='i_feats')
         }
 
-    def _init_network(self, network):
-        network_module, network_name = network.rsplit(".", 1)
-        network_cls = getattr(importlib.import_module(network_module), network_name)
-
-        return network_cls(self.m_size, self.s_size, self.i_size)
-
-    def _init_target_actions(self):
+    def _init_target_placeholders(self):
         return {
             "spatial": tf.placeholder(tf.float32, [None, self.s_size ** 2], name='spatial_action_selected'),
             "non_spatial": tf.placeholder(tf.float32, [None, len(actions.FUNCTIONS)],
@@ -216,38 +207,16 @@ class Worker(BaseAgent):
             "value": tf.placeholder(tf.float32, [None], name='value_target')
         }
 
-    def _init_valid_actions(self):
+    def _init_valid_action_placeholders(self):
         return {
             "spatial": tf.placeholder(tf.float32, [None], name='valid_spatial_action'),
             "non_spatial": tf.placeholder(tf.float32, [None, len(actions.FUNCTIONS)], name='valid_non_spatial_action')
         }
 
     def _value_net_predict(self, obs):
-        minimap = np.array(obs.observation["minimap"], dtype=np.float32)
-        minimap = np.expand_dims(util.preprocess_minimap(minimap), axis=0)
-        screen = np.array(obs.obsevation["screen"], dtype=np.float32)
-        screen = np.expand_dims(util.preprocess_screen(screen), axis=0)
-        info = np.zeros([1, self.s_size * self.s_size], dtype=np.float32)
-
-        # let the agent know what it can do
-        info[0, obs.observation['available_actions']] = 1
-
-        count = 0
-        # General player information, such as player_id, minerals, army count
-        for feature in obs.observation["player"]:
-            info[0, len(actions.FUNCTIONS) + count] = feature
-            count += 1
-
-        tmp_counter = 0
-        # single select information
-        for feature in obs.observation['player']:
-            info[0, len(actions.FUNCTIONS) + count] = feature
-            if tmp_counter == 2 or tmp_counter == 3 or tmp_counter == 4:
-                if feature > 0:
-                    info[0, len(actions.FUNCTIONS) + count] = math.log(feature)
-
-            count += 1
-            tmp_counter += 1
+        minimap = util.minimap_obs(obs)
+        screen = util.screen_obs(obs)
+        info = util.info_obs(obs)
 
         feed_dict = {self.features["minimap"]: minimap,
                      self.features["screen"]: screen,
@@ -258,7 +227,6 @@ class Worker(BaseAgent):
     def reset(self):
         self.episodes += 1
         self.steps = 0
-        self.epsilon = [0.3, 0.3]
 
     def run(self, coord, max_update_steps, max_local_steps):
         env = self.env_fn()
@@ -271,100 +239,59 @@ class Worker(BaseAgent):
             try:
                 while not coord.should_stop():
                     # Collect some experience
-                    replay_buffer = []
-                    for recorder, is_done, global_step in runner.run_n_steps(self.global_step_counter):
-                        if is_done:
-                            global_episode = next(self.global_episode_counter)
-                            print("{} - Global episode: {}".format(self.name, global_episode))
+                    for replay_buffer, is_done, global_step in runner.run_n_steps(self.global_step_counter):
+                        if self.is_training:
+                            self.update(replay_buffer, FLAGS.learning_rate, global_episode)
 
-                        # If global max steps reached or global max episodes reached, terminate session
-                        if self.max_global_steps != 0 and global_step >= self.max_global_steps:
-                            print("Reached max global step {}".format(global_step))
-                            is_session_done = True
-                        elif self.max_global_episodes != 0 and global_episode >= self.max_global_episodes:
-                            print("Reached max global episodes {}".format(global_episode))
-                            is_session_done = True
-                        if is_session_done:
-                            coord.request_stop()
-                            return
-                        # if FLAGS.training:
-                        #     replay_buffer += recorder
-                        #     if is_done:
-                        #         pass
-                        #     #     counter += 1
-                        #     #     # Learning rate schedule
-                        #     #     learning_rate = FLAGS.learning_rate * (1 - 0.9 * counter / FLAGS.max_steps)
-                        #     #     agent.update(replay_buffer, FLAGS.discount, learning_rate, counter)
-                        #     #     replay_buffer = []
-                        #     #     if counter % FLAGS.snapshot_step == 1:
-                        #     #         agent.save_model(SNAPSHOT_PATH, counter)
-                        #     #     if counter >= FLAGS.num_episodes:
-                        #     #         break
-                        # # elif is_done:
-                        # #     obs = recorder[-1].observation
-                        # #     score = obs["score_cumulative"][0]
-                        # #     print('Your score is ' + str(score) + '!')
-                        # if is_done and FLAGS.save_replay:
-                        #     env.save_replay(self.name)
-                        #     global_episode = next(self.global_episode_counter)
-                        #     if self.max_global_steps != 0 and global_episode >= self.max_global_steps:
-                        #         coord.request_stop()
-                        #         return
+                            if is_done:
+                                global_episode = next(self.global_episode_counter)
+                                logging.info("{} - Global episode: {}".format(self.name, global_episode))
+
+                                if FLAGS.save_replay:
+                                    env.save_replay(self.name)
+                            #     if counter % FLAGS.snapshot_step == 1:
+                            #         agent.save_model(SNAPSHOT_PATH, counter)
+
+                            # If global max steps reached or global max episodes reached, terminate session
+                            if self.max_global_steps != 0 and global_step >= self.max_global_steps:
+                                logging.info("Reached max global step {}".format(global_step))
+                                is_session_done = True
+                            elif self.max_global_episodes != 0 and global_episode >= self.max_global_episodes:
+                                logging.info("Reached max global episodes {}".format(global_episode))
+                                is_session_done = True
+                            if is_session_done:
+                                coord.request_stop()
+                                return
+
+                        elif is_done:
+                            obs = replay_buffer[-1].observation
+                            score = obs["score_cumulative"][0]
+                            logging.info("Your score is {}!".format(str(score)))
+
             except tf.errors.CancelledError:
                 return
 
-    def step(self, obs):
-        minimap = np.array(obs.observation['minimap'], dtype=np.float32)
-        minimap = np.expand_dims(util.preprocess_minimap(minimap), axis=0)
-        screen = np.array(obs.observation['screen'], dtype=np.float32)
-        screen = np.expand_dims(util.preprocess_screen(screen), axis=0)
+    def _explore(self, valid_actions):
+        # Choose a random action
+        act_id = np.random.choice(valid_actions)
 
-        info = np.zeros([1, self.s_size * self.s_size], dtype=np.float32)
+        # Choose random target
+        target = [np.random.randint(0, self.s_size),
+                  np.random.randint(0, self.s_size)]
 
-        # let the agent know what it can do
-        info[0, obs.observation['available_actions']] = 1
+        return act_id, target
 
-        count = 0
-        # general player information, such as player_id, minerals, army count
-        for feature in obs.observation['player']:
-            info[0, len(actions.FUNCTIONS) + count] = feature
-            count += 1
-
-        tmp_counter = 0
-        # single select information
-        for feature in obs.observation['player']:
-            info[0, len(actions.FUNCTIONS) + count] = feature
-            if tmp_counter == 2 or tmp_counter == 3 or tmp_counter == 4:
-                if feature > 0:
-                    info[0, len(actions.FUNCTIONS) + count] = math.log(feature)
-            count += 1
-            tmp_counter += 1
-
-        feed_dict = {self.features["minimap"]: minimap,
-                     self.features["screen"]: screen,
-                     self.features["info"]: info}
-        non_spatial_action, spatial_action = self.session.run(
-            [self.net_output["non_spatial"], self.net_output["spatial"]],
-            feed_dict=feed_dict)
-
-        # Select an action and a spatial target
-        non_spatial_action = non_spatial_action.ravel()
-        spatial_action = spatial_action.ravel()
-        valid_actions = obs.observation['available_actions']
+    def _exploit(self, valid_actions, spatial_action, non_spatial_action):
+        # Choose 'best' action
         act_id = valid_actions[np.argmax(non_spatial_action[valid_actions])]
         target = np.argmax(spatial_action)
+
+        # Resize to provided resolution
         target = [int(target // self.s_size), int(target % self.s_size)]
 
-        # Epsilon greedy exploration
-        if self.is_training and np.random.rand() < self.epsilon[0]:
-            act_id = np.random.choice(valid_actions)
-        if self.is_training and np.random.rand() < self.epsilon[1]:
-            dy = np.random.randint(-4, 5)
-            target[0] = int(max(0, min(self.s_size - 1, target[0] + dy)))
-            dx = np.random.randint(-4, 5)
-            target[1] = int(max(0, min(self.s_size - 1, target[1] + dx)))
+        return act_id, target
 
-        # Set act_id and act_args
+    def _get_action_arguments(self, act_id, target):
         act_args = []
         for arg in actions.FUNCTIONS[act_id].args:
             if arg.name in ('screen', 'minimap', 'screen2'):
@@ -373,57 +300,70 @@ class Worker(BaseAgent):
             else:
                 act_args.append([0])
 
+        return act_args
+
+    def step(self, obs):
+        minimap = util.minimap_obs(obs)
+        screen = util.screen_obs(obs)
+        info = util.info_obs(obs)  # Structured data not obtained from pixels
+
+        feed_dict = {self.features["minimap"]: minimap,
+                     self.features["screen"]: screen,
+                     self.features["info"]: info}
+
+        # Get spatial/non_spatial policies
+        non_spatial_action, spatial_action = \
+            self.session.run([self.net_output["non_spatial"], self.net_output["spatial"]], feed_dict=feed_dict)
+
+        non_spatial_action = non_spatial_action.ravel()
+        spatial_action = spatial_action.ravel()
+        valid_actions = obs.observation['available_actions']
+
+        # # Epsilon greedy exploration
+        # if self.is_training and np.random.rand() < self.epsilon:
+        #     # Explore random action/target
+        #     act_id, target = self._explore(valid_actions)
+        # else:
+        # Exploit the 'best' policy
+        act_id, target = self._exploit(valid_actions, spatial_action, non_spatial_action)
+
+        act_args = self._get_action_arguments(act_id, target)
+
         self.steps += 1
+        if self.name[-1] == '0':
+            logging.info("{} - Action at step {}: {}({})"
+                          .format(self.name, self.steps, actions.FUNCTIONS[act_id], act_args))
         return actions.FunctionCall(act_id, act_args)
 
-    def update(self, replay_buffer, discount, learning_rate, counter):
+    def update(self, replay_buffer, learning_rate, counter):
         # Compute value of last observation
         obs = replay_buffer[-1][-1]
 
         # If last observation, set reward = 0
         reward = 0.0
         if not obs.last():
+            # Otherwise bootstrap from last state
             reward = self._value_net_predict(obs)
 
-        # Compute targets and masks
-        value_target = np.zeros([len(replay_buffer)], dtype=np.float32)
-        value_target[-1] = reward
+        # Preallocate arrays sizes for _*speed*_
+        value_targets = np.zeros([len(replay_buffer)], dtype=np.float32)
+        value_targets[-1] = reward
 
         valid_spatial_action = np.zeros([len(replay_buffer)], dtype=np.float32)
         spatial_action_selected = np.zeros([len(replay_buffer), self.s_size ** 2], dtype=np.float32)
         valid_non_spatial_action = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
         non_spatial_action_selected = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
 
+        # Accumulate batch updates
         minimaps = []
         screens = []
         infos = []
 
         replay_buffer.reverse()
         for i, [action, obs] in enumerate(replay_buffer):
-            minimap = np.array(obs.observation["minimap"], dtype=np.float32)
-            minimap = np.expand_dims(util.preprocess_minimap(minimap), axis=0)
-            screen = np.array(obs.observation["screen"], dtype=np.float32)
-            screen = np.expand_dims(util.preprocess_screen(screen), axis=0)
-            info = np.zeros([1, self.s_size * self.s_size], dtype=np.float32)
-
-            # let the agent know what it can do
-            info[0, obs.observation['available_actions']] = 1
-
-            count = 0
-            # general player information, such as player_id, minerals, army count
-            for feature in obs.observation['player']:
-                info[0, len(actions.FUNCTIONS) + count] = feature
-                count += 1
-
-            tmp_counter = 0
-            # single select information
-            for feature in obs.observation['player']:
-                info[0, len(actions.FUNCTIONS) + count] = feature
-                if tmp_counter == 2 or tmp_counter == 3 or tmp_counter == 4:
-                    if feature > 0:
-                        info[0, len(actions.FUNCTIONS) + count] = math.log(feature)
-                count += 1
-                tmp_counter += 1
+            minimap = util.minimap_obs(obs)
+            screen = util.screen_obs(obs)
+            info = util.info_obs(obs)
 
             minimaps.append(minimap)
             screens.append(screen)
@@ -433,7 +373,7 @@ class Worker(BaseAgent):
             act_id = action.function
             act_args = action.arguments
 
-            value_target[i] = reward + discount * value_target[i - 1]
+            value_targets[i] = reward + self.discount_factor * value_targets[i - 1]
 
             valid_actions = obs.observation["available_actions"]
             valid_non_spatial_action[i, valid_actions] = 1
@@ -454,7 +394,7 @@ class Worker(BaseAgent):
         feed_dict = {self.features["minimap"]: minimaps,
                      self.features["screen"]: screens,
                      self.features["info"]: infos,
-                     self.targets["value"]: value_target,
+                     self.targets["value"]: value_targets,
                      self.valid_actions["spatial"]: valid_spatial_action,
                      self.targets["spatial"]: spatial_action_selected,
                      self.valid_actions["non_spatial"]: valid_non_spatial_action,

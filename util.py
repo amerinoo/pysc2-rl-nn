@@ -1,11 +1,72 @@
 import numpy as np
 import tensorflow as tf
 
-from pysc2.lib import features
+import importlib
+
+from pysc2.lib import features, actions
+
+import math
 
 _MINIMAP_PLAYER_ID = features.MINIMAP_FEATURES.player_id.index
 _SCREEN_PLAYER_ID = features.SCREEN_FEATURES.player_id.index
 _SCREEN_UNIT_TYPE = features.SCREEN_FEATURES.unit_type.index
+
+
+def init_network(network, m_size, s_size, num_actions):
+    network_module, network_name = network.rsplit(".", 1)
+    network_cls = getattr(importlib.import_module(network_module), network_name)
+
+    return network_cls(m_size, s_size, num_actions)
+
+
+def minimap_obs(obs):
+    m = np.array(obs.observation["minimap"], dtype=np.float32)
+    return np.expand_dims(preprocess_minimap(m), axis=0)
+
+
+def screen_obs(obs):
+    s = np.array(obs.observation["screen"], dtype=np.float32)
+    return np.expand_dims(preprocess_screen(s), axis=0)
+
+
+def info_obs(obs):
+    info = np.zeros([1, structured_channel_size()], dtype=np.float32)
+
+    # Mask available actions
+    info[0, obs.observation["available_actions"]] = 1
+
+    # General player information:
+    #     player_id, minerals, vespene, food_used, food_cap, food_army,
+    #     food_workers, idle_worker_count, army_count, warp_gate_count, larva_count,
+    player_obs_len = len(obs.observation["player"])
+    for offset in range(player_obs_len):
+        feature = obs.observation["player"][offset]
+
+        # Take the log of numerical data to keep numbers low
+        if offset > 0 and feature > 0:
+            info[0, len(actions.FUNCTIONS) + offset] = math.log(feature)
+        else:
+            info[0, len(actions.FUNCTIONS) + offset] = feature
+
+    # Single select information:
+    #     unit_type, player_relative, health, shields,
+    #     energy, transport_slots_taken, build_progress
+    single_obs_len = len(obs.observation["single_select"][0])
+    for offset in range(single_obs_len):
+        feature = obs.observation["single_select"][0][offset]
+        # Take the log of numerical data to keep numbers low
+        if ((2 <= offset <= 4) or offset == 6) and feature > 0:
+            info[0, len(actions.FUNCTIONS) + player_obs_len + offset] = math.log(feature)
+        else:
+            info[0, len(actions.FUNCTIONS) + player_obs_len + offset] = feature
+
+    # TODO:
+    #   Add control groups
+    #   Add multi-select
+    #   Add cargo
+    #   Add build_queue
+
+    return info
 
 
 def preprocess_minimap(minimap):
@@ -42,7 +103,7 @@ def preprocess_screen(screen):
     return np.concatenate(layers, axis=0)
 
 
-def minimap_channel():
+def minimap_channel_size():
     c = 0
     for i in range(len(features.MINIMAP_FEATURES)):
         if i == _MINIMAP_PLAYER_ID:
@@ -54,7 +115,7 @@ def minimap_channel():
     return c
 
 
-def screen_channel():
+def screen_channel_size():
     c = 0
     for i in range(len(features.SCREEN_FEATURES)):
         if i == _SCREEN_PLAYER_ID or i == _SCREEN_UNIT_TYPE:
@@ -64,6 +125,11 @@ def screen_channel():
         else:
             c += features.SCREEN_FEATURES[i].scale
     return c
+
+
+def structured_channel_size():
+    # Upper bound for structured data
+    return 4096
 
 
 def normalized_columns_initializer(std=1.0):

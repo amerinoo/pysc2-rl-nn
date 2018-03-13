@@ -1,5 +1,9 @@
 import time
 
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
 
 class Runner(object):
     def __init__(self, agent, env, update_period=0, max_local_steps=0, max_global_steps=0):
@@ -38,21 +42,22 @@ class Runner(object):
                 self.agent.reset()
 
             while True:
-                assert(self.timestep is not None)
+                assert (self.timestep is not None)
 
                 action = self.agent.step(self.timestep)
 
                 global_step = next(global_step_counter)
 
                 # Yield current buffer if update_period is reached or episode finished
-                is_update_ready = self.agent.steps % self.update_period == 0
+                is_update_ready = self.update_period != 0 and self.agent.steps % self.update_period == 0
                 is_done = self.timestep.last() \
-                    or (self.max_local_steps != 0 and self.agent.steps >= self.max_local_steps) \
-                    or (self.max_global_steps != 0 and global_step >= self.max_global_steps)
+                          or (self.max_local_steps != 0 and self.agent.steps >= self.max_local_steps) \
+                          or (self.max_global_steps != 0 and global_step >= self.max_global_steps)
 
                 replay_buffer.append([action, self.timestep])
                 if is_update_ready or is_done:
-                    print("Updating {} at step {}/{}".format(self.agent.name, self.agent.steps, self.max_local_steps))
+                    logging.info(
+                        "Updating {} at step {}/{}".format(self.agent.name, self.agent.steps, self.max_local_steps))
                     yield replay_buffer, is_done, global_step
                 if is_done:
                     self._reset()
@@ -65,5 +70,5 @@ class Runner(object):
             pass
         finally:
             elapsed_time = time.time() - self.start_time
-            print("Took %.3f seconds for %s steps: %.3f steps/second"
-                  % (elapsed_time, self.agent.steps, self.agent.steps/elapsed_time))
+            logging.info("Took %.3f seconds for %s steps: %.3f steps/second"
+                         % (elapsed_time, self.agent.steps, self.agent.steps / elapsed_time))

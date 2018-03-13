@@ -10,17 +10,19 @@ import tensorflow as tf
 from absl import app
 from absl import flags
 
+import time
+
 FLAGS = flags.FLAGS
 
 # Training Flags
 flags.DEFINE_bool("training", True, "Whether to train agents.")
 flags.DEFINE_bool("continuation", False, "Continuously training.")
-flags.DEFINE_float("learning_rate", .001, "Learning rate for training.")
+flags.DEFINE_float("learning_rate", 1e-3, "Learning rate for training.")
 flags.DEFINE_float("discount", 0.99, "Discount rate for future rewards.")
-flags.DEFINE_float("max_update_steps", 40, "Number of steps before performing an update")
-flags.DEFINE_integer("max_steps", int(1e2), "Max steps per episode.")
-flags.DEFINE_integer("max_global_steps", int(1e3), "Max global steps.")
-flags.DEFINE_integer("num_episodes", int(10), "Total episodes for training")
+flags.DEFINE_float("max_update_steps", 0, "Maximum number of steps before performing an update")
+flags.DEFINE_integer("max_steps", int(0), "Max steps per episode.")
+flags.DEFINE_integer("max_global_steps", int(0), "Max global steps.")
+flags.DEFINE_integer("num_episodes", int(1000), "Total episodes for training")
 flags.DEFINE_integer("snapshot_step", int(15), "Step for snapshot.")
 flags.DEFINE_string("snapshot_path", "./snapshot/", "Path for snapshot.")
 flags.DEFINE_string("log_path", "./log/", "Path for log.")
@@ -61,7 +63,7 @@ else:
     DEVICE = ['/cpu:0']
 
 # Set up directory folders for logs and checkpoints
-LOG = FLAGS.log_path + FLAGS.map + '/' + FLAGS.agent
+LOG = FLAGS.log_path + FLAGS.map + '/' + FLAGS.agent + '/' + str(time.time())
 SNAPSHOT_PATH = FLAGS.snapshot_path + FLAGS.map + '/' + FLAGS.agent
 if not os.path.exists(LOG):
     os.makedirs(LOG)

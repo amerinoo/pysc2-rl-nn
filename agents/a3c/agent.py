@@ -5,8 +5,10 @@ from absl import flags
 
 from pysc2.agents import base_agent
 from pysc2.env import available_actions_printer, sc2_env
+from pysc2.lib import actions
 
 import tensorflow as tf
+import util
 
 from agents.a3c.worker import Worker
 
@@ -35,7 +37,6 @@ class A3CAgent(base_agent.BaseAgent):
 
         self.saver = None
 
-
     def _make_env(self):
         with sc2_env.SC2Env(
                 map_name=FLAGS.map,
@@ -53,12 +54,13 @@ class A3CAgent(base_agent.BaseAgent):
     def initialize(self, device, worker_count):
         with tf.device("/cpu:0"):
             # Keeps track of the number of updates we've performed
-            global_step = tf.Variable(0, name="global_step", trainable=False)
+            # global_step = tf.Variable(0, name="global_step", trainable=False)
 
-            # Global policy and value nets
-            with tf.variable_scope("global") as vs:
-                policy_net = None
-                value_net = None
+            # Global network
+            # with tf.variable_scope("global") as vs:
+            #     global_net = util.init_network(self.network_name, self.m_size, self.s_size, len(actions.FUNCTIONS))
+            #     # global_net.init_inputs()
+            #     # global_net.build()
 
             # Global iterators
             global_step_counter = itertools.count()
@@ -71,17 +73,15 @@ class A3CAgent(base_agent.BaseAgent):
                     worker_summary_writer = self.summary_writer
 
                 worker = Worker(reuse=worker_id > 0,
-                                scope=self.name,
                                 name="{}_{}".format(self.name, worker_id),
                                 env_fn=self._make_env,
-                                device=device[worker_id%len(device)],
+                                device=device[worker_id % len(device)],
                                 session=self.session,
                                 is_training=self.is_training,
                                 m_size=self.m_size,
                                 s_size=self.s_size,
-                                policy_net=policy_net,
-                                value_net=value_net,
-                                core_net=self.network_name,
+                                global_net=None,  # global_net,
+                                local_net=self.network_name,
                                 global_step_counter=global_step_counter,
                                 global_episode_counter=global_episode_counter,
                                 map_name=self.map_name,
