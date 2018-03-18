@@ -139,3 +139,13 @@ def normalized_columns_initializer(std=1.0):
         return tf.constant(out)
     return _initializer
 
+def get_action_arguments(act_id, target):
+    act_args = []
+    for arg in actions.FUNCTIONS[act_id].args:
+        if arg.name in ('screen', 'minimap', 'screen2'):
+            act_args.append([target[1], target[0]])
+            pass
+        else:
+            act_args.append([0])
+
+    return act_args

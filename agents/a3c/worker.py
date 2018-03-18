@@ -63,13 +63,12 @@ class Worker(BaseAgent):
         self.s_size = s_size
 
         # Network
-        self.network = util.init_network(local_net, self.m_size, self.s_size, len(actions.FUNCTIONS))
-        self.net_output = {}
-
+        self.network = util.init_network(local_net, self.m_size, self.s_size)
+        self.policy_net = {}
+        self.value_net = None
         # self.epsilon = 0.05
 
         # Tensor dictionaries
-        self.features = {}
         self.valid_actions = {}
         self.targets = {}
 
@@ -90,9 +89,7 @@ class Worker(BaseAgent):
                 assert tf.get_variable_scope().reuse
 
             # Build the network
-            self.features = self._init_input_placeholders()
-            self.network.init_inputs(self.features)
-            self.net_output = self.network.build()
+            self.policy_net, self.value_net = self.network.build()
 
             # Initialize placeholders for masks and targets
             self.valid_actions = self._init_valid_action_placeholders()
@@ -103,10 +100,10 @@ class Worker(BaseAgent):
             advantage = self._compute_advantage()
             weighted_entropy = self._compute_weighted_entropy(action_log_probs, B=0.01)
 
-            policy_loss = self._compute_policy_loss(action_log_probs, advantage)
+            policy_loss = self._compute_policy_loss(action_log_probs, advantage, weighted_entropy)
             value_loss = self._compute_value_loss(advantage)
 
-            loss = policy_loss + value_loss + weighted_entropy
+            loss = policy_loss + value_loss
             if self.summary_writer is not None:
                 self.summary.append(tf.summary.scalar('loss', loss))
 
@@ -135,21 +132,30 @@ class Worker(BaseAgent):
             self.summary_op = tf.summary.merge(self.summary)
 
     def _compute_weighted_entropy(self, action_log_probs, B):
-        spatial_entropy = -tf.reduce_sum(tf.reduce_sum(self.net_output["spatial"], axis=1) * action_log_probs["spatial"])
-        non_spatial_entropy = -tf.reduce_sum(tf.reduce_sum(self.net_output["non_spatial"], axis=1) * action_log_probs["non_spatial"])
+        spatial_action_prob = tf.reduce_sum(self.policy_net["spatial"] * self.targets["spatial"], axis=1)
+        non_spatial_action_prob = tf.reduce_sum(self.policy_net["non_spatial"] * self.targets["non_spatial"], axis=1)
+
+        spatial_entropy = -tf.reduce_sum(spatial_action_prob * action_log_probs["spatial"])
+        non_spatial_entropy = -tf.reduce_sum(non_spatial_action_prob * action_log_probs["non_spatial"])
+
+        if self.summary_writer is not None:
+            self.summary.append(tf.summary.scalar("spatial_entropy", spatial_entropy))
+            self.summary.append(tf.summary.scalar("non_spatial_entropy", non_spatial_entropy))
+            self.summary.append(tf.summary.scalar("entropy", B * (spatial_entropy + non_spatial_entropy)))
+
         return B * (spatial_entropy + non_spatial_entropy)
 
     def _compute_log_probability(self):
         # Log of Sum over spatial policy * target
-        spatial_action_prob = tf.reduce_sum(self.net_output["spatial"] * self.targets["spatial"], axis=1)
+        spatial_action_prob = tf.reduce_sum(self.policy_net["spatial"] * self.targets["spatial"], axis=1)
         spatial_action_log_prob = tf.log(tf.clip_by_value(spatial_action_prob, 1e-10, 1.))
 
         # Sum over non spatial policy * target
-        non_spatial_action_prob = tf.reduce_sum(self.net_output["non_spatial"] * self.targets["non_spatial"], axis=1)
+        non_spatial_action_prob = tf.reduce_sum(self.policy_net["non_spatial"] * self.targets["non_spatial"], axis=1)
 
         # Sum over non_spatial policy * non_spatial mask
         valid_non_spatial_action_prob = tf.reduce_sum(
-            self.net_output["non_spatial"] * self.valid_actions["non_spatial"],
+            self.policy_net["non_spatial"] * self.valid_actions["non_spatial"],
             axis=1)
 
         # Clip valid non_spatial action probabilities
@@ -169,13 +175,13 @@ class Worker(BaseAgent):
 
     def _compute_advantage(self):
         # R - V(s)
-        return tf.stop_gradient(self.targets["value"] - self.net_output["value"])
+        return tf.stop_gradient(self.targets["value"] - self.value_net)
 
-    def _compute_policy_loss(self, action_log_probs, advantage):
+    def _compute_policy_loss(self, action_log_probs, advantage, entropy_regularization):
         # -log(Policy) * advantage - B*Entropy(policy)
         action_log_prob = self.valid_actions["spatial"] * action_log_probs["spatial"] + action_log_probs["non_spatial"]
 
-        policy_loss = -tf.reduce_mean(action_log_prob * advantage)
+        policy_loss = -tf.reduce_mean(action_log_prob * advantage) + entropy_regularization
         if self.summary_writer is not None:
             self.summary.append(tf.summary.scalar('policy_loss', policy_loss))
 
@@ -184,20 +190,11 @@ class Worker(BaseAgent):
     def _compute_value_loss(self, advantage):
         # Sum((R - V(s))^2
         # TODO: Compare differences between implementations
-        value_loss = -tf.reduce_mean(self.net_output["value"] * advantage)
+        value_loss = -tf.reduce_mean(self.value_net * advantage)
         if self.summary_writer is not None:
             self.summary.append(tf.summary.scalar('value_loss', value_loss))
 
         return value_loss
-
-    def _init_input_placeholders(self):
-        return {
-            "minimap": tf.placeholder(tf.float32, [None, util.minimap_channel_size(), self.m_size, self.m_size],
-                                      name='m_feats'),
-            "screen": tf.placeholder(tf.float32, [None, util.screen_channel_size(), self.s_size, self.s_size],
-                                     name='s_feats'),
-            "info": tf.placeholder(tf.float32, [None, util.structured_channel_size()], name='i_feats')
-        }
 
     def _init_target_placeholders(self):
         return {
@@ -214,15 +211,13 @@ class Worker(BaseAgent):
         }
 
     def _value_net_predict(self, obs):
-        minimap = util.minimap_obs(obs)
-        screen = util.screen_obs(obs)
-        info = util.info_obs(obs)
+        feed_dict = {
+             self.network.features["minimap"]: util.minimap_obs(obs),
+             self.network.features["screen"]: util.screen_obs(obs),
+             self.network.features["info"]: util.info_obs(obs)
+        }
 
-        feed_dict = {self.features["minimap"]: minimap,
-                     self.features["screen"]: screen,
-                     self.features["info"]: info}
-
-        return self.session.run(self.net_output["value"], feed_dict=feed_dict)[0]
+        return self.session.run(self.value_net, feed_dict=feed_dict)
 
     def reset(self):
         self.episodes += 1
@@ -271,8 +266,8 @@ class Worker(BaseAgent):
             except tf.errors.CancelledError:
                 return
 
-    def _explore(self, valid_actions):
-        # Choose a random action
+    def _exploit_random(self, valid_actions):
+        # Choose a random valid action
         act_id = np.random.choice(valid_actions)
 
         # Choose random target
@@ -281,58 +276,62 @@ class Worker(BaseAgent):
 
         return act_id, target
 
-    def _exploit(self, valid_actions, spatial_action, non_spatial_action):
-        # Choose 'best' action
-        act_id = valid_actions[np.argmax(non_spatial_action[valid_actions])]
-        target = np.argmax(spatial_action)
+    def _exploit_max(self, policy, valid_actions):
+        # Choose 'best' valid action
+        act_id = valid_actions[np.argmax(policy["non_spatial"][valid_actions])]
+        target = np.argmax(policy["spatial"])
+
+        # Resize to provided resolution
+        # Example:
+        #   target = 535 -> 535 // 64 = 8, 535 % 64 = 24
+        #   target = [8, 24]
+        target = [int(target // self.s_size), int(target % self.s_size)]
+
+        return act_id, target
+
+    def _exploit_distribution(self, policy, valid_actions):
+        # Mask actions
+        non_spatial_policy = policy["non_spatial"][valid_actions]
+
+        # Normalize probabilities
+        non_spatial_probs = non_spatial_policy/np.sum(non_spatial_policy)
+
+        # Choose from normalized distribution
+        act_id = np.random.choice(valid_actions, p=non_spatial_probs)
+        target = np.random.choice(np.arange(len(policy["spatial"])), p=policy["spatial"])
 
         # Resize to provided resolution
         target = [int(target // self.s_size), int(target % self.s_size)]
 
         return act_id, target
 
-    def _get_action_arguments(self, act_id, target):
-        act_args = []
-        for arg in actions.FUNCTIONS[act_id].args:
-            if arg.name in ('screen', 'minimap', 'screen2'):
-                act_args.append([target[1], target[0]])
-                pass
-            else:
-                act_args.append([0])
-
-        return act_args
-
     def step(self, obs):
-        minimap = util.minimap_obs(obs)
-        screen = util.screen_obs(obs)
-        info = util.info_obs(obs)  # Structured data not obtained from pixels
-
-        feed_dict = {self.features["minimap"]: minimap,
-                     self.features["screen"]: screen,
-                     self.features["info"]: info}
+        feed_dict = {
+             self.network.features["minimap"]: util.minimap_obs(obs),
+             self.network.features["screen"]: util.screen_obs(obs),
+             self.network.features["info"]: util.info_obs(obs)
+        }
 
         # Get spatial/non_spatial policies
-        non_spatial_action, spatial_action = \
-            self.session.run([self.net_output["non_spatial"], self.net_output["spatial"]], feed_dict=feed_dict)
+        policy = self.session.run({
+                "spatial": self.policy_net["spatial"],
+                "non_spatial": self.policy_net["non_spatial"]
+            }, feed_dict=feed_dict)
 
-        non_spatial_action = non_spatial_action.ravel()
-        spatial_action = spatial_action.ravel()
+        policy["non_spatial"] = policy["non_spatial"].ravel()
+        policy["spatial"] = policy["spatial"].ravel()
         valid_actions = obs.observation['available_actions']
 
-        # # Epsilon greedy exploration
-        # if self.is_training and np.random.rand() < self.epsilon:
-        #     # Explore random action/target
-        #     act_id, target = self._explore(valid_actions)
-        # else:
-        # Exploit the 'best' policy
-        act_id, target = self._exploit(valid_actions, spatial_action, non_spatial_action)
+        act_id, target = self._exploit_distribution(policy, valid_actions)
 
-        act_args = self._get_action_arguments(act_id, target)
+        act_args = util.get_action_arguments(act_id, target)
 
         self.steps += 1
-        if self.name[-1] == '0':
-            logging.info("{} - Action at step {}: {}({})"
-                          .format(self.name, self.steps, actions.FUNCTIONS[act_id], act_args))
+        # if self.name[-1] == '0':
+        #     logging.info("Target: {}".format(target))
+        #     logging.info("Non-spatial: {}".format(non_spatial_action))
+        #     logging.info("{} - Action at step {}: {}({})"
+        #                 .format(self.name, self.steps, actions.FUNCTIONS[act_id], act_args))
         return actions.FunctionCall(act_id, act_args)
 
     def update(self, replay_buffer, learning_rate, counter):
@@ -386,14 +385,11 @@ class Worker(BaseAgent):
                     valid_spatial_action[i] = 1
                     spatial_action_selected[i, ind] = 1
 
-        minimaps = np.concatenate(minimaps, axis=0)
-        screens = np.concatenate(screens, axis=0)
-        infos = np.concatenate(infos, axis=0)
-
         # Train
-        feed_dict = {self.features["minimap"]: minimaps,
-                     self.features["screen"]: screens,
-                     self.features["info"]: infos,
+        feed_dict = {
+                     self.network.features["minimap"]: np.concatenate(minimaps, axis=0),
+                     self.network.features["screen"]: np.concatenate(screens, axis=0),
+                     self.network.features["info"]: np.concatenate(infos, axis=0),
                      self.targets["value"]: value_targets,
                      self.valid_actions["spatial"]: valid_spatial_action,
                      self.targets["spatial"]: spatial_action_selected,
