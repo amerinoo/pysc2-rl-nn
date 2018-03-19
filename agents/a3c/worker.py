@@ -1,18 +1,16 @@
-import logging
-
 import tensorflow as tf
 import numpy as np
+
 
 from pysc2.agents.base_agent import BaseAgent
 from pysc2.lib import actions
 
 import util
 
+from agents.a3c.estimators import PolicyEstimator, ValueEstimator
 from runner import Runner
 
 from absl import flags
-
-logging.basicConfig(level=logging.INFO)
 
 FLAGS = flags.FLAGS
 SNAPSHOT_PATH = FLAGS.snapshot_path + FLAGS.map + '/' + FLAGS.agent
@@ -22,14 +20,14 @@ class Worker(BaseAgent):
     def __init__(self,
                  name,
                  env_fn,
-                 reuse,
                  device,
                  session,
                  is_training,
                  m_size,
                  s_size,
-                 global_net,
-                 local_net,
+                 policy_net,
+                 value_net,
+                 network,
                  global_step_counter,
                  global_episode_counter,
                  map_name,
@@ -45,7 +43,6 @@ class Worker(BaseAgent):
         self.max_global_steps = max_global_steps
         self.max_global_episodes = max_global_episodes
         self.global_step = tf.train.get_global_step()
-        self.global_net = global_net
         self.global_step_counter = global_step_counter
         self.global_episode_counter = global_episode_counter
 
@@ -63,161 +60,63 @@ class Worker(BaseAgent):
         self.s_size = s_size
 
         # Network
-        self.network = util.init_network(local_net, self.m_size, self.s_size)
-        self.policy_net = {}
-        self.value_net = None
-        # self.epsilon = 0.05
+        self.global_policy_net = policy_net
+        self.global_value_net = value_net
 
         # Tensor dictionaries
         self.valid_actions = {}
-        self.targets = {}
-
-        # Operations
-        self.train_op = None
-        self.summary_op = None
 
         # Saver
         self.saver = None
 
         # build the local model
-        self._build_model(reuse, device)
+        self._build_model(network, device)
 
-    def _build_model(self, reuse, device):
-        with tf.variable_scope("shared") and tf.device(device):
-            if reuse:
-                tf.get_variable_scope().reuse_variables()
-                assert tf.get_variable_scope().reuse
+    def _build_model(self, network, device):
+        with tf.device(device):
+            with tf.variable_scope(self.name) as vs:
+                # Build the rest of the network
+                self.policy_net = PolicyEstimator(
+                    self.m_size, self.s_size, network, summary_writer=self.summary_writer)
+                self.value_net = ValueEstimator(
+                    self.m_size, self.s_size, network, reuse=True, summary_writer=self.summary_writer)
 
-            # Build the network
-            self.policy_net, self.value_net = self.network.build()
+                self.copy_params_op = util.make_copy_params_op(
+                    tf.contrib.slim.get_variables(scope="global", collection=tf.GraphKeys.TRAINABLE_VARIABLES),
+                    tf.contrib.slim.get_variables(scope=self.name+'/', collection=tf.GraphKeys.TRAINABLE_VARIABLES)
+                )
 
-            # Initialize placeholders for masks and targets
-            self.valid_actions = self._init_valid_action_placeholders()
-            self.targets = self._init_target_placeholders()
+                self.vnet_train_op = util.make_train_op(self.value_net, self.global_value_net)
+                self.pnet_train_op = util.make_train_op(self.policy_net, self.global_policy_net)
 
-            # Compute losses
-            action_log_probs = self._compute_log_probability()
-            advantage = self._compute_advantage()
-            weighted_entropy = self._compute_weighted_entropy(action_log_probs, B=0.01)
+                self.saver = tf.train.Saver(max_to_keep=100)
 
-            policy_loss = self._compute_policy_loss(action_log_probs, advantage, weighted_entropy)
-            value_loss = self._compute_value_loss(advantage)
-
-            loss = policy_loss + value_loss
-            if self.summary_writer is not None:
-                self.summary.append(tf.summary.scalar('loss', loss))
-
-            # Build optimizer
-            self._build_optimizer(loss)
-
-            self.saver = tf.train.Saver(max_to_keep=100)
-
-    def _build_optimizer(self, loss):
-        self.learning_rate = tf.placeholder(tf.float32, None, name="learning_rate")
-        optimizer = tf.train.RMSPropOptimizer(self.learning_rate, decay=0.99, epsilon=1e-10)
-        gradients = optimizer.compute_gradients(loss)
-        clipped_gradients = []
-        for g, v in gradients:
-            if g is None:
-                continue
-
-            if self.summary_writer is not None:
-                self.summary.append(tf.summary.histogram(v.op.name, v))
-                self.summary.append(tf.summary.histogram(v.op.name + '/gradient', g))
-            g = tf.clip_by_norm(g, 10.0)
-            clipped_gradients.append([g, v])
-        self.train_op = optimizer.apply_gradients(clipped_gradients)
-
-        if self.summary_writer is not None:
-            self.summary_op = tf.summary.merge(self.summary)
-
-    def _compute_weighted_entropy(self, action_log_probs, B):
-        spatial_action_prob = tf.reduce_sum(self.policy_net["spatial"] * self.targets["spatial"], axis=1)
-        non_spatial_action_prob = tf.reduce_sum(self.policy_net["non_spatial"] * self.targets["non_spatial"], axis=1)
-
-        spatial_entropy = -tf.reduce_sum(spatial_action_prob * action_log_probs["spatial"])
-        non_spatial_entropy = -tf.reduce_sum(non_spatial_action_prob * action_log_probs["non_spatial"])
-
-        if self.summary_writer is not None:
-            self.summary.append(tf.summary.scalar("spatial_entropy", spatial_entropy))
-            self.summary.append(tf.summary.scalar("non_spatial_entropy", non_spatial_entropy))
-            self.summary.append(tf.summary.scalar("entropy", B * (spatial_entropy + non_spatial_entropy)))
-
-        return B * (spatial_entropy + non_spatial_entropy)
-
-    def _compute_log_probability(self):
-        # Log of Sum over spatial policy * target
-        spatial_action_prob = tf.reduce_sum(self.policy_net["spatial"] * self.targets["spatial"], axis=1)
-        spatial_action_log_prob = tf.log(tf.clip_by_value(spatial_action_prob, 1e-10, 1.))
-
-        # Sum over non spatial policy * target
-        non_spatial_action_prob = tf.reduce_sum(self.policy_net["non_spatial"] * self.targets["non_spatial"], axis=1)
-
-        # Sum over non_spatial policy * non_spatial mask
-        valid_non_spatial_action_prob = tf.reduce_sum(
-            self.policy_net["non_spatial"] * self.valid_actions["non_spatial"],
-            axis=1)
-
-        # Clip valid non_spatial action probabilities
-        valid_non_spatial_action_prob = tf.clip_by_value(valid_non_spatial_action_prob, 1e-10, 1.)
-
-        non_spatial_action_prob = non_spatial_action_prob / valid_non_spatial_action_prob
-
-        # Take log of clipped non spatial action probability
-        non_spatial_action_log_prob = tf.log(tf.clip_by_value(non_spatial_action_prob, 1e-10, 1.))
-
-        # Log histogram for tensorboard
-        if self.summary_writer is not None:
-            self.summary.append(tf.summary.histogram("spatial_action_prob", spatial_action_prob))
-            self.summary.append(tf.summary.histogram('non_spatial_action_prob', non_spatial_action_prob))
-
-        return {"spatial": spatial_action_log_prob, "non_spatial": non_spatial_action_log_prob}
-
-    def _compute_advantage(self):
-        # R - V(s)
-        return tf.stop_gradient(self.targets["value"] - self.value_net)
-
-    def _compute_policy_loss(self, action_log_probs, advantage, entropy_regularization):
-        # -log(Policy) * advantage - B*Entropy(policy)
-        action_log_prob = self.valid_actions["spatial"] * action_log_probs["spatial"] + action_log_probs["non_spatial"]
-
-        policy_loss = -tf.reduce_mean(action_log_prob * advantage) + entropy_regularization
-        if self.summary_writer is not None:
-            self.summary.append(tf.summary.scalar('policy_loss', policy_loss))
-
-        return policy_loss
-
-    def _compute_value_loss(self, advantage):
-        # Sum((R - V(s))^2
-        # TODO: Compare differences between implementations
-        value_loss = -tf.reduce_mean(self.value_net * advantage)
-        if self.summary_writer is not None:
-            self.summary.append(tf.summary.scalar('value_loss', value_loss))
-
-        return value_loss
-
-    def _init_target_placeholders(self):
-        return {
-            "spatial": tf.placeholder(tf.float32, [None, self.s_size ** 2], name='spatial_action_selected'),
-            "non_spatial": tf.placeholder(tf.float32, [None, len(actions.FUNCTIONS)],
-                                          name='non_spatial_action_selected'),
-            "value": tf.placeholder(tf.float32, [None], name='value_target')
+    def _policy_net_predict(self, obs):
+        feed_dict = {
+             self.policy_net.features["minimap"]: util.minimap_obs(obs),
+             self.policy_net.features["screen"]: util.screen_obs(obs),
+             self.policy_net.features["info"]: util.info_obs(obs)
         }
 
-    def _init_valid_action_placeholders(self):
-        return {
-            "spatial": tf.placeholder(tf.float32, [None], name='valid_spatial_action'),
-            "non_spatial": tf.placeholder(tf.float32, [None, len(actions.FUNCTIONS)], name='valid_non_spatial_action')
-        }
+        # Get spatial/non_spatial policies
+        policy = self.session.run({
+                "spatial": self.policy_net.prediction["spatial"],
+                "non_spatial": self.policy_net.prediction["non_spatial"]
+            }, feed_dict=feed_dict)
+
+        policy["non_spatial"] = policy["non_spatial"].ravel()
+        policy["spatial"] = policy["spatial"].ravel()
+
+        return policy
 
     def _value_net_predict(self, obs):
         feed_dict = {
-             self.network.features["minimap"]: util.minimap_obs(obs),
-             self.network.features["screen"]: util.screen_obs(obs),
-             self.network.features["info"]: util.info_obs(obs)
+             self.value_net.features["minimap"]: util.minimap_obs(obs),
+             self.value_net.features["screen"]: util.screen_obs(obs),
+             self.value_net.features["info"]: util.info_obs(obs)
         }
 
-        return self.session.run(self.value_net, feed_dict=feed_dict)
+        return self.session.run(self.value_net.prediction, feed_dict=feed_dict)
 
     def reset(self):
         self.episodes += 1
@@ -233,6 +132,9 @@ class Worker(BaseAgent):
 
             try:
                 while not coord.should_stop():
+                    # Copy parameters from the global networks
+                    self.session.run(self.copy_params_op)
+
                     # Collect some experience
                     for replay_buffer, is_done, global_step in runner.run_n_steps(self.global_step_counter):
                         if self.is_training:
@@ -240,7 +142,7 @@ class Worker(BaseAgent):
 
                             if is_done:
                                 global_episode = next(self.global_episode_counter)
-                                logging.info("{} - Global episode: {}".format(self.name, global_episode))
+                                tf.logging.info("{} - Global episode: {}".format(self.name, global_episode))
 
                                 if FLAGS.save_replay:
                                     env.save_replay(self.name)
@@ -249,10 +151,10 @@ class Worker(BaseAgent):
 
                             # If global max steps reached or global max episodes reached, terminate session
                             if self.max_global_steps != 0 and global_step >= self.max_global_steps:
-                                logging.info("Reached max global step {}".format(global_step))
+                                tf.logging.info("Reached max global step {}".format(global_step))
                                 is_session_done = True
                             elif self.max_global_episodes != 0 and global_episode >= self.max_global_episodes:
-                                logging.info("Reached max global episodes {}".format(global_episode))
+                                tf.logging.info("Reached max global episodes {}".format(global_episode))
                                 is_session_done = True
                             if is_session_done:
                                 coord.request_stop()
@@ -261,7 +163,7 @@ class Worker(BaseAgent):
                         elif is_done:
                             obs = replay_buffer[-1].observation
                             score = obs["score_cumulative"][0]
-                            logging.info("Your score is {}!".format(str(score)))
+                            tf.logging.info("Your score is {}!".format(str(score)))
 
             except tf.errors.CancelledError:
                 return
@@ -306,103 +208,109 @@ class Worker(BaseAgent):
         return act_id, target
 
     def step(self, obs):
-        feed_dict = {
-             self.network.features["minimap"]: util.minimap_obs(obs),
-             self.network.features["screen"]: util.screen_obs(obs),
-             self.network.features["info"]: util.info_obs(obs)
-        }
-
-        # Get spatial/non_spatial policies
-        policy = self.session.run({
-                "spatial": self.policy_net["spatial"],
-                "non_spatial": self.policy_net["non_spatial"]
-            }, feed_dict=feed_dict)
-
-        policy["non_spatial"] = policy["non_spatial"].ravel()
-        policy["spatial"] = policy["spatial"].ravel()
+        policy = self._policy_net_predict(obs)
         valid_actions = obs.observation['available_actions']
-
         act_id, target = self._exploit_distribution(policy, valid_actions)
-
         act_args = util.get_action_arguments(act_id, target)
 
         self.steps += 1
-        # if self.name[-1] == '0':
-        #     logging.info("Target: {}".format(target))
-        #     logging.info("Non-spatial: {}".format(non_spatial_action))
-        #     logging.info("{} - Action at step {}: {}({})"
-        #                 .format(self.name, self.steps, actions.FUNCTIONS[act_id], act_args))
+
         return actions.FunctionCall(act_id, act_args)
 
     def update(self, replay_buffer, learning_rate, counter):
         # Compute value of last observation
         obs = replay_buffer[-1][-1]
 
-        # If last observation, set reward = 0
+        # If obs wasn't done, bootstrap from last state
         reward = 0.0
         if not obs.last():
-            # Otherwise bootstrap from last state
             reward = self._value_net_predict(obs)
 
-        # Preallocate arrays sizes for _*speed*_
+        # Preallocate array sizes for _*speed*_
         value_targets = np.zeros([len(replay_buffer)], dtype=np.float32)
+        policy_targets = np.zeros([len(replay_buffer)], dtype=np.float32)
         value_targets[-1] = reward
 
-        valid_spatial_action = np.zeros([len(replay_buffer)], dtype=np.float32)
-        spatial_action_selected = np.zeros([len(replay_buffer), self.s_size ** 2], dtype=np.float32)
-        valid_non_spatial_action = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
-        non_spatial_action_selected = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
+        valid_spatial_actions = np.zeros([len(replay_buffer)], dtype=np.int32)
+        spatial_actions_selected = np.zeros([len(replay_buffer), self.s_size ** 2], dtype=np.int32)
+        valid_non_spatial_actions = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.int32)
+        non_spatial_actions_selected = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.int32)
 
-        # Accumulate batch updates
+        # TODO: Preallocate sizes
         minimaps = []
         screens = []
         infos = []
 
+        # Accumulate batch updates
         replay_buffer.reverse()
         for i, [action, obs] in enumerate(replay_buffer):
-            minimap = util.minimap_obs(obs)
-            screen = util.screen_obs(obs)
-            info = util.info_obs(obs)
+            # Update state
+            minimaps.append(util.minimap_obs(obs))
+            screens.append(util.screen_obs(obs))
+            infos.append(util.info_obs(obs))
 
-            minimaps.append(minimap)
-            screens.append(screen)
-            infos.append(info)
-
-            reward = int(obs.observation["score_cumulative"][0])
+            # Get selected action
             act_id = action.function
             act_args = action.arguments
 
-            value_targets[i] = reward + self.discount_factor * value_targets[i - 1]
+            # Update reward
+            reward = int(obs.observation["score_cumulative"][0]) + self.discount_factor * reward
+            policy_target = (reward - self._value_net_predict(obs))
 
+            policy_targets[i] = policy_target   # Append advantage
+            value_targets[i] = reward           # Append discounted reward
+
+            # Append selected action
             valid_actions = obs.observation["available_actions"]
-            valid_non_spatial_action[i, valid_actions] = 1
-            non_spatial_action_selected[i, act_id] = 1
+            valid_non_spatial_actions[i, valid_actions] = 1
+            non_spatial_actions_selected[i, act_id] = 1
 
             args = actions.FUNCTIONS[act_id].args
             for arg, act_arg in zip(args, act_args):
                 if arg.name in ('screen', 'minimap', 'screen2'):
                     ind = act_arg[1] * self.s_size + act_arg[0]
-                    valid_spatial_action[i] = 1
-                    spatial_action_selected[i, ind] = 1
+                    valid_spatial_actions[i] = 1
+                    spatial_actions_selected[i, ind] = 1
+
+        minimaps = np.concatenate(minimaps, axis=0)
+        screens = np.concatenate(screens, axis=0)
+        infos = np.concatenate(infos, axis=0)
 
         # Train
         feed_dict = {
-                     self.network.features["minimap"]: np.concatenate(minimaps, axis=0),
-                     self.network.features["screen"]: np.concatenate(screens, axis=0),
-                     self.network.features["info"]: np.concatenate(infos, axis=0),
-                     self.targets["value"]: value_targets,
-                     self.valid_actions["spatial"]: valid_spatial_action,
-                     self.targets["spatial"]: spatial_action_selected,
-                     self.valid_actions["non_spatial"]: valid_non_spatial_action,
-                     self.targets["non_spatial"]: non_spatial_action_selected,
-                     self.learning_rate: learning_rate}
+            self.policy_net.features["minimap"]: minimaps,
+            self.policy_net.features["screen"]: screens,
+            self.policy_net.features["info"]: infos,
+            self.policy_net.actions["spatial"]: spatial_actions_selected,
+            self.policy_net.actions["non_spatial"]: non_spatial_actions_selected,
+            self.policy_net.targets: policy_targets,
+            self.policy_net.valid_actions["spatial"]: valid_spatial_actions,
+            self.policy_net.valid_actions["non_spatial"]: valid_non_spatial_actions,
+            # self.policy_net.learning_rate: learning_rate,
+            self.value_net.features["minimap"]: minimaps,
+            self.value_net.features["screen"]: screens,
+            self.value_net.features["info"]: infos,
+            self.value_net.targets: value_targets
+            # self.value_net.learning_rate: learning_rate
+        }
 
-        if self.summary_writer is not None:
-            _, summary = self.session.run([self.train_op, self.summary_op], feed_dict=feed_dict)
-            self.summary_writer.add_graph(self.session.graph)
-            self.summary_writer.add_summary(summary, counter)
-        else:
-            self.session.run(self.train_op, feed_dict=feed_dict)
+        # if self.summary_writer is not None:
+        #     _, summary = self.session.run([self.train_op, self.summary_op], feed_dict=feed_dict)
+        #     self.summary_writer.add_graph(self.session.graph)
+        #     self.summary_writer.add_summary(summary, counter)
+        # else:
+
+        global_step, pnet_loss, vnet_loss, _, _, = self.session.run([
+            self.global_step,
+            self.policy_net.loss,
+            self.value_net.loss,
+            self.pnet_train_op,
+            self.vnet_train_op
+            # self.policy_net.summaries,
+            # self.value_net.summaries
+        ], feed_dict)
+
+        return pnet_loss, vnet_loss
 
     def save_model(self, path, counter):
         self.saver.save(self.session, path + '/model.pkl', counter)
