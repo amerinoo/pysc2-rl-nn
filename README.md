@@ -1,5 +1,5 @@
 # pysc2-rl-nn
-PySC2 - Attempt to recreate results obtained by O. Vinyals et al (2017) in StarCraft II: A New Challenge for Reinforcement Learning
+Attempt to recreate results obtained by O. Vinyals et al (2017) in StarCraft II: A New Challenge for Reinforcement Learning
 
 ### References:
 
@@ -7,11 +7,12 @@ Papers:
 https://arxiv.org/pdf/1602.01783.pdf    
 https://arxiv.org/pdf/1708.04782.pdf    
 
-Repositories:
+#### Repositories:   
 PySC2:    
 https://github.com/deepmind/pysc2    
 
 A3C:     
+https://github.com/dennybritz/reinforcement-learning/tree/master/PolicyGradient   
 https://github.com/xhujoy/pysc2-agents    
 https://github.com/awjuliani/DeepRL-Agents/blob/master/A3C-Doom.ipynb    
 https://github.com/chris-chris/pysc2-examples/tree/master/a2c    
