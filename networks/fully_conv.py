@@ -1,6 +1,9 @@
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
 
+import util
+
+
 class FullyConv(object):
     def __init__(self, m_size, s_size):
         # Make sure that screen resolution is equal to minimap resolution
@@ -8,7 +11,7 @@ class FullyConv(object):
         self.m_size = m_size
         self.s_size = s_size
 
-    def build(self, features):
+    def build(self, features, summarize=False):
         # Extract features while preserving the dimensions
 
         # Minimap convolutions
@@ -78,8 +81,17 @@ class FullyConv(object):
             layers.flatten(state_representation),
             num_outputs=256,
             activation_fn=tf.nn.relu,
-            scope='fully_conv_features'
+            scope='fully_conv_features',
+            weights_initializer=util.normalized_columns_initializer()
         )
+
+        if summarize:
+            layers.summarize_activation(m_preprocess)
+            layers.summarize_activation(m_conv1)
+            layers.summarize_activation(m_conv2)
+            layers.summarize_activation(s_conv1)
+            layers.summarize_activation(s_conv2)
+            layers.summarize_activation(fc)
 
         return state_representation, fc
 

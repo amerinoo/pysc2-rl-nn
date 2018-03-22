@@ -3,30 +3,14 @@ import tensorflow.contrib.layers as layers
 import util
 import pysc2.lib.actions as actions
 
+
 class PolicyEstimator(object):
-    def __init__(self, m_size, s_size, network, reuse=False, trainable=True, summary_writer=None):
-        # Make sure that screen resolution is equal to minimap resolution
-        assert (m_size == s_size)
-        self.m_size = m_size
-        self.s_size = s_size
+    def __init__(self, s_size, state, fc, trainable=True, summarize=False):
+        self.size = s_size
+        self.state = state
+        self.fc = fc
 
-        self.network = network
-
-        # Input placeholders
-        self.features = {
-            "minimap": tf.placeholder(
-                tf.float32, [None, util.minimap_channel_size(), self.m_size, self.m_size],
-                name='minimap_features'
-            ),
-            "screen": tf.placeholder(
-                tf.float32, [None, util.screen_channel_size(), self.s_size, self.s_size],
-                name='screen_features'
-            ),
-            "info": tf.placeholder(
-                tf.float32, [None, util.structured_channel_size()],
-                name='info_features'
-            )
-        }
+        self.summaries = []
 
         # Target placeholders
         self.targets = tf.placeholder(
@@ -49,20 +33,19 @@ class PolicyEstimator(object):
         # Action placeholders
         self.actions = {
             "spatial": tf.placeholder(
-                tf.int32, [None, s_size ** 2],
+                # tf.int32, [None, s_size**2]
+                tf.int32, [None],
                 name='spatial_action_selected'
             ),
             "non_spatial": tf.placeholder(
-                tf.int32, [None, len(actions.FUNCTIONS)],
+                # tf.int32, [None, len(actions.FUNCTIONS)],
+                tf.int32, [None],
                 name='non_spatial_action_selected'
             )
         }
 
         # Batch size = number of steps fed to network
         batch_size = tf.shape(self.targets)[0]
-
-        with tf.variable_scope("shared", reuse=reuse):
-            self.state, self.fc = self.network.build(self.features)
 
         with tf.variable_scope("policy_net"):
             self.prediction = {
@@ -75,7 +58,8 @@ class PolicyEstimator(object):
                                 kernel_size=1,
                                 stride=1,
                                 activation_fn=None,
-                                scope='spatial_probs'
+                                scope='spatial_probs',
+                                weights_initializer=util.normalized_columns_initializer()
                             )
                         )
                     ),
@@ -97,19 +81,28 @@ class PolicyEstimator(object):
                 self.prediction["non_spatial"] * tf.log(self.prediction["non_spatial"]), 1,
                 name="non_spatial_entropy"
             )
-            self.entropy_mean = tf.reduce_mean([
-                tf.reduce_mean(self.spatial_entropy),
-                tf.reduce_mean(self.non_spatial_entropy)
-            ], name="entropy_mean")
 
-            picked_spatial_actions = tf.argmax(self.actions["spatial"], axis=1)
-            picked_non_spatial_actions = tf.argmax(self.actions["non_spatial"], axis=1)
-            self.picked_non_spatial_probs = \
-                tf.gather(tf.reshape(self.prediction["non_spatial"], [-1]), picked_non_spatial_actions)
-            self.picked_spatial_probs = \
-                tf.gather(tf.reshape(self.prediction["spatial"], [-1]), picked_spatial_actions)
+            self.entropy_mean = tf.reduce_mean(
+                [
+                    tf.reduce_mean(self.spatial_entropy),
+                    tf.reduce_mean(self.non_spatial_entropy)
+                ],
+                name="entropy_mean"
+            )
 
-            # Policy Loss: L = -log(π(s)) * A(s) - β*H(π) : over batched states
+            # picked_spatial_actions = tf.argmax(self.actions["spatial"], axis=1)
+            # picked_non_spatial_actions = tf.argmax(self.actions["non_spatial"], axis=1)
+
+            self.picked_non_spatial_probs = tf.gather(
+                tf.reshape(self.prediction["non_spatial"], [-1]), self.actions["non_spatial"],
+                name="gather_non_spatial_probs"
+            )
+            self.picked_spatial_probs = tf.gather(
+                tf.reshape(self.prediction["spatial"], [-1]), self.actions["spatial"],
+                name="gather_spatial_probs"
+            )
+
+            # Policy Loss: L = -(log(π(s)) * A(s)) - β*H(π) : over batched states
             self.spatial_losses = \
                 -(tf.log(self.picked_spatial_probs) * self.targets) + 0.01 * self.spatial_entropy
             self.non_spatial_losses = \
@@ -120,7 +113,7 @@ class PolicyEstimator(object):
             ], name="policy_loss")
 
             if trainable:
-                self.learning_rate = 1e-6  # tf.placeholder(tf.float32, None, name="learning_rate")
+                self.learning_rate = 3e-3  # tf.placeholder(tf.float32, None, name="learning_rate")
                 self.optimizer = tf.train.RMSPropOptimizer(
                     self.learning_rate, decay=0.99, epsilon=1e-6,
                     name="policy_optimizer"
@@ -133,40 +126,30 @@ class PolicyEstimator(object):
                     name="policy_grads"
                 )
 
+        if summarize:
+            self.summaries.append(tf.summary.histogram('spatial_action_policy', self.prediction["spatial"]))
+            self.summaries.append(tf.summary.histogram('non_spatial_action_policy', self.prediction["non_spatial"]))
+            self.summaries.append(tf.summary.scalar('spatial_entropy', tf.reduce_mean(self.spatial_entropy)))
+            self.summaries.append(tf.summary.scalar('non_spatial_entropy', tf.reduce_mean(self.non_spatial_entropy)))
+            self.summaries.append(tf.summary.scalar('entropy', self.entropy_mean))
+            self.summaries.append(tf.summary.histogram('spatial_loss', self.spatial_losses))
+            self.summaries.append(tf.summary.histogram('non_spatial_loss', self.non_spatial_losses))
+            self.summaries.append(tf.summary.scalar('policy_loss', self.loss))
+            self.summaries = tf.summary.merge(self.summaries)
+            # self.summaries = tf.summary.merge_all(var_scope_name)
+
 
 class ValueEstimator(object):
-    def __init__(self, m_size, s_size, network, reuse=False, trainable=True, summary_writer=None):
-        # Make sure that screen resolution is equal to minimap resolution
-        assert (m_size == s_size)
-        self.m_size = m_size
-        self.s_size = s_size
+    def __init__(self, fc, trainable=True, summarize=False):
+        self.fc = fc
 
-        self.network = network
-
-        # Input placeholders
-        self.features = {
-            "minimap": tf.placeholder(
-                tf.float32, [None, util.minimap_channel_size(), self.m_size, self.m_size],
-                name='minimap_features'
-            ),
-            "screen": tf.placeholder(
-                tf.float32, [None, util.screen_channel_size(), self.s_size, self.s_size],
-                name='screen_features'
-            ),
-            "info": tf.placeholder(
-                tf.float32, [None, util.structured_channel_size()],
-                name='info_features'
-            )
-        }
+        self.summaries = []
 
         # Target placeholders
         self.targets = tf.placeholder(
                 tf.float32, [None],
                 name='value'
             )
-
-        with tf.variable_scope("shared", reuse=reuse):
-            _, self.fc = self.network.build(self.features)
 
         with tf.variable_scope("value_net"):
             self.prediction = layers.fully_connected(
@@ -179,8 +162,20 @@ class ValueEstimator(object):
             self.losses = tf.squared_difference(self.prediction, self.targets)
             self.loss = tf.reduce_sum(self.losses, name="value_loss")
 
+            if summarize:
+                prefix = tf.get_variable_scope().name
+                self.summaries.append(tf.summary.scalar(self.loss.name, self.loss))
+                self.summaries.append(tf.summary.scalar("{}/max_value".format(prefix), tf.reduce_max(self.prediction)))
+                self.summaries.append(tf.summary.scalar("{}/min_value".format(prefix), tf.reduce_min(self.prediction)))
+                self.summaries.append(tf.summary.scalar("{}/mean_value".format(prefix), tf.reduce_mean(self.prediction)))
+                self.summaries.append(tf.summary.scalar("{}/reward_max".format(prefix), tf.reduce_max(self.targets)))
+                self.summaries.append(tf.summary.scalar("{}/reward_min".format(prefix), tf.reduce_min(self.targets)))
+                self.summaries.append(tf.summary.scalar("{}/reward_mean".format(prefix), tf.reduce_mean(self.targets)))
+                self.summaries.append(tf.summary.histogram("{}/reward_targets".format(prefix), self.targets))
+                self.summaries.append(tf.summary.histogram("{}/values".format(prefix), self.prediction))
+
             if trainable:
-                self.learning_rate = 1e-6  # tf.placeholder(tf.float32, None, name="learning_rate")
+                self.learning_rate = 3e-3  # tf.placeholder(tf.float32, None, name="learning_rate")
                 self.optimizer = tf.train.RMSPropOptimizer(self.learning_rate, decay=0.99, epsilon=1e-6)
                 self.grads_and_vars = self.optimizer.compute_gradients(self.loss)
                 self.grads_and_vars = [[g, v] for g, v in self.grads_and_vars if g is not None]
@@ -189,3 +184,10 @@ class ValueEstimator(object):
                     global_step=tf.train.get_global_step(),
                     name="value_grads"
                 )
+
+        if summarize:
+            self.summaries.append(tf.summary.scalar('value_loss', self.loss))
+            self.summaries = tf.summary.merge(self.summaries)
+        # if summarize:
+        #     var_scope_name = tf.get_variable_scope().name
+        #     self.summaries = tf.summary.merge_all(var_scope_name)

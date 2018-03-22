@@ -19,6 +19,23 @@ def init_network(network, m_size, s_size):
     return network_cls(m_size, s_size)
 
 
+def init_feature_placeholders(m_size, s_size):
+    return {
+        "minimap": tf.placeholder(
+            tf.float32, [None, minimap_channel_size(), m_size, m_size],
+            name='minimap_features'
+        ),
+        "screen": tf.placeholder(
+            tf.float32, [None, screen_channel_size(), s_size, s_size],
+            name='screen_features'
+        ),
+        "info": tf.placeholder(
+            tf.float32, [None, structured_channel_size()],
+            name='info_features'
+        )
+    }
+
+
 def minimap_obs(obs):
     m = np.array(obs.observation["minimap"], dtype=np.float32)
     return np.expand_dims(preprocess_minimap(m), axis=0)
@@ -159,8 +176,11 @@ def make_copy_params_op(v1_list, v2_list):
 
     update_ops = []
     for v1, v2 in zip(v1_list, v2_list):
-        op = v2.assign(v1)
-        update_ops.append(op)
+        try:
+            op = v2.assign(v1)
+            update_ops.append(op)
+        except ValueError as e:
+            print(e)
 
     return update_ops
 
@@ -170,6 +190,7 @@ def make_train_op(local_estimator, global_estimator):
     # Clip gradients
     local_grads, _ = tf.clip_by_global_norm(local_grads, 5.0)
     _, global_vars = zip(*global_estimator.grads_and_vars)
+
     local_global_grads_and_vars = list(zip(local_grads, global_vars))
 
     return global_estimator.optimizer.apply_gradients(

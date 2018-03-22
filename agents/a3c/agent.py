@@ -12,6 +12,7 @@ from agents.a3c.worker import Worker
 from agents.a3c.estimators import PolicyEstimator, ValueEstimator
 
 import util
+import time
 
 FLAGS = flags.FLAGS
 
@@ -54,15 +55,16 @@ class A3CAgent(base_agent.BaseAgent):
             return available_actions_printer.AvailableActionsPrinter(env)
 
     def initialize(self, device, worker_count):
-        with tf.device("/cpu:0"):
+        with tf.device(device[0]):
             # Keeps track of the number of updates we've performed
             global_step = tf.Variable(0, name="global_step", trainable=False)
 
             # Global network
-            with tf.variable_scope("global") as vs:
+            with tf.variable_scope("global"):
                 network = util.init_network(self.network_name, self.m_size, self.s_size)
-                policy_net = PolicyEstimator(self.m_size, self.s_size, network)
-                value_net = ValueEstimator(self.m_size, self.s_size, network, reuse=True)
+                state, fc = network.build(util.init_feature_placeholders(self.m_size, self.s_size))
+                policy_net = PolicyEstimator(self.s_size, state, fc)
+                value_net = ValueEstimator(fc)
 
             # Global iterators
             global_step_counter = itertools.count()
@@ -77,7 +79,7 @@ class A3CAgent(base_agent.BaseAgent):
                 worker = Worker(
                     name="{}_{}".format(self.name, worker_id),
                     env_fn=self._make_env,
-                    device=device[(worker_id) % len(device)],
+                    device=device[(worker_id+1) % len(device)],
                     session=self.session,
                     is_training=self.is_training,
                     m_size=self.m_size,
@@ -95,7 +97,7 @@ class A3CAgent(base_agent.BaseAgent):
                 )
                 self.workers.append(worker)
 
-            self.saver = tf.train.Saver(keep_checkpoint_every_n_hours=0.16, max_to_keep=3)
+            #self.saver = tf.train.Saver(keep_checkpoint_every_n_hours=0.16, max_to_keep=3)
 
     def run(self):
         with self.session as session:
@@ -113,5 +115,6 @@ class A3CAgent(base_agent.BaseAgent):
                 threads.append(t)
                 t.daemon = True
                 t.start()
+                time.sleep(FLAGS.stagger)
 
             coord.join(threads)
