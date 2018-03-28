@@ -82,7 +82,6 @@ class FullyConv(object):
             num_outputs=256,
             activation_fn=tf.nn.relu,
             scope='fully_conv_features',
-            weights_initializer=util.normalized_columns_initializer()
         )
 
         if summarize:

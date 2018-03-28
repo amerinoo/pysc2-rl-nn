@@ -185,15 +185,15 @@ def make_copy_params_op(v1_list, v2_list):
     return update_ops
 
 
-def make_train_op(local_estimator, global_estimator):
-    local_grads, _ = zip(*local_estimator.grads_and_vars)
+def make_train_op(local_optimizer, global_optimizer):
+    local_grads, _ = zip(*local_optimizer.grads_and_vars)
     # Clip gradients
-    local_grads, _ = tf.clip_by_global_norm(local_grads, 5.0)
-    _, global_vars = zip(*global_estimator.grads_and_vars)
+    local_grads, _ = tf.clip_by_global_norm(local_grads, 1.0)
+    _, global_vars = zip(*global_optimizer.grads_and_vars)
 
     local_global_grads_and_vars = list(zip(local_grads, global_vars))
 
-    return global_estimator.optimizer.apply_gradients(
+    return global_optimizer.optimizer.apply_gradients(
         local_global_grads_and_vars,
         global_step=tf.train.get_global_step()
     )

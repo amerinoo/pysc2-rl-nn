@@ -30,6 +30,7 @@ flags.DEFINE_integer("num_gpus", 2, "Number of GPUs for training")
 flags.DEFINE_integer("num_cpus", 8, "Number of CPUs for training")
 flags.DEFINE_integer("parallel", 2, "How many instances to run in parallel.")
 flags.DEFINE_integer("stagger", int(15), "Delay between each initial agent run")
+flags.DEFINE_bool("dual_msprop", False, "Train policy and value nets separately")
 
 # Scenario Flags
 flags.DEFINE_string("map", "MoveToBeacon", "Name of a map to use.")
