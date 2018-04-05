@@ -18,7 +18,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_bool("training", True, "Whether to train agents.")
 flags.DEFINE_bool("continuation", False, "Continuously training.")
 flags.DEFINE_float("learning_rate", 1e-3, "Learning rate for training.")
-flags.DEFINE_float("discount", 0.99, "Discount rate for future rewards.")
+flags.DEFINE_float("discount", 0.9, "Discount rate for future rewards.")
 flags.DEFINE_float("max_update_steps", 0, "Maximum number of steps before performing an update (0 for full episode).")
 flags.DEFINE_integer("max_steps", int(0), "Max steps per episode (0 for no max).")
 flags.DEFINE_integer("max_global_steps", int(0), "Max global steps (0 for no max).")

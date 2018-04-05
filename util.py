@@ -5,11 +5,71 @@ import importlib
 
 from pysc2.lib import features, actions
 
-import math
+
+def spatial_features_channel_size(feature_layers_info, forced_scalars=None, excluded_features=None):
+    """
+    Args:
+        feature_layers_info: pySC2 definitions for Minimap or Screen features
+        forced_scalars: A list containing categorical feature layers to be treated as scalars
+        excluded_features: A list containing features to exclude
+    Returns:
+        The channel size of the feature layers in feature_layers_info
+    """
+    if forced_scalars is None:
+        forced_scalars = []
+    if excluded_features is None:
+        excluded_features = []
+    c = 0
+    for i in range(len(feature_layers_info)):
+        if i in excluded_features:
+            continue
+        if feature_layers_info[i].type == features.FeatureType.SCALAR or i in forced_scalars:
+            c += 1
+        else:
+            c += feature_layers_info[i].scale
+    return c
+
+
+def structured_channel_size():
+    # "player": (11,),
+    c = 11
+    # "game_loop": (1,),
+    # c += 1
+    # "score_cumulative": (13,),
+    # c += 13
+    # "available_actions": (0,),
+    c += len(actions.FUNCTIONS)  # 524
+    # "single_select": (0, 7), Actually only (n, 7) for n in (0, 1)
+    c += 7
+    # "multi_select": (0, 7),
+    c += 7 * 400  # Technical unit selection limit is 500, 400 is the practical limit (excluding Overlords)
+    # "cargo": (0, 7),
+    # c += 7 * 8  # Max cargo
+    # "cargo_slots_available": (1,),
+    # c += 1
+    # "build_queue": (0, 7),
+    # c += 7 * 5  # Max build queue
+    # "control_groups": (10, 2),
+    # c += 10 * 2
+    c = (c + 1024 - (c % 1024))
+    # return c
+    return 4096
+
 
 _MINIMAP_PLAYER_ID = features.MINIMAP_FEATURES.player_id.index
 _SCREEN_PLAYER_ID = features.SCREEN_FEATURES.player_id.index
 _SCREEN_UNIT_TYPE = features.SCREEN_FEATURES.unit_type.index
+
+_MINIMAP_FEATURE_SIZE = spatial_features_channel_size(
+    features.MINIMAP_FEATURES,
+    forced_scalars=[_MINIMAP_PLAYER_ID],
+    excluded_features=[2])
+_SCREEN_FEATURE_SIZE = spatial_features_channel_size(
+    features.SCREEN_FEATURES,
+    forced_scalars=[_SCREEN_PLAYER_ID, _SCREEN_UNIT_TYPE],
+    excluded_features=[2, 3, 10, 11, 12, 13])
+_STRUCTURED_FEATURE_SIZE = structured_channel_size()
+
 
 
 def init_network(network, m_size, s_size):
@@ -22,140 +82,228 @@ def init_network(network, m_size, s_size):
 def init_feature_placeholders(m_size, s_size):
     return {
         "minimap": tf.placeholder(
-            tf.float32, [None, minimap_channel_size(), m_size, m_size],
+            tf.float32, [None, _MINIMAP_FEATURE_SIZE, m_size, m_size],
             name='minimap_features'
         ),
         "screen": tf.placeholder(
-            tf.float32, [None, screen_channel_size(), s_size, s_size],
+            tf.float32, [None, _SCREEN_FEATURE_SIZE, s_size, s_size],
             name='screen_features'
         ),
         "info": tf.placeholder(
-            tf.float32, [None, structured_channel_size()],
+            tf.float32, [None, _STRUCTURED_FEATURE_SIZE],
             name='info_features'
         )
     }
 
 
 def minimap_obs(obs):
-    m = np.array(obs.observation["minimap"], dtype=np.float32)
-    return np.expand_dims(preprocess_minimap(m), axis=0)
+    """
+    Args:
+        obs: Observation from the SC2 environment
+    Returns:
+        Given no forced scalars or excluded features,
+        minimap feature layers of shape (1, 33, minimap_size, minimap_size)
+    """
+    m = np.array(obs.observation["minimap"], dtype=np.float32)  # shape = (7, size_m, size_m)
+    return np.expand_dims(
+        preprocess_spatial_features(
+            m,
+            features.MINIMAP_FEATURES,
+            forced_scalars=[_MINIMAP_PLAYER_ID],
+            excluded_features=[2]
+        ),
+        axis=0
+    )
 
 
 def screen_obs(obs):
-    s = np.array(obs.observation["screen"], dtype=np.float32)
-    return np.expand_dims(preprocess_screen(s), axis=0)
+    """
+    Args:
+        obs: Observation from the SC2 environment
+    Returns:
+        Give no forced scalars or excluded features,
+        screen feature layers of shape (1, 1907, screen_size, screen_size)
+    """
+    s = np.array(obs.observation["screen"], dtype=np.float32)   # shape = (17, size_s, size_s)
+    return np.expand_dims(
+        preprocess_spatial_features(
+            s,
+            features.SCREEN_FEATURES,
+            forced_scalars=[_SCREEN_PLAYER_ID, _SCREEN_UNIT_TYPE],
+            excluded_features=[2, 3, 10, 11, 12, 13]
+        ),
+        axis=0
+    )
 
 
 def info_obs(obs):
     info = np.zeros([1, structured_channel_size()], dtype=np.float32)
+    info_offset = 0
 
-    # Mask available actions
-    info[0, obs.observation["available_actions"]] = 1
+    info, info_offset = append_info_obs(
+        info,
+        info_offset,
+        obs.observation["player"],
+        categorical_indices=[0]
+    )
 
-    # General player information:
-    #     player_id, minerals, vespene, food_used, food_cap, food_army,
-    #     food_workers, idle_worker_count, army_count, warp_gate_count, larva_count,
-    player_obs_len = len(obs.observation["player"])
-    for offset in range(player_obs_len):
-        feature = obs.observation["player"][offset]
+    # info, info_offset = append_info_obs(
+    #     info,
+    #     info_offset,
+    #     obs.observation["game_loop"]
+    # )
+    #
+    # info, info_offset = append_info_obs(
+    #     info,
+    #     info_offset,
+    #     obs.observation["score_cumulative"]
+    # )
 
-        # Take the log of numerical data to keep numbers low
-        if offset > 0 and feature > 0:
-            info[0, len(actions.FUNCTIONS) + offset] = math.log(feature)
-        else:
-            info[0, len(actions.FUNCTIONS) + offset] = feature
+    info[0, info_offset + obs.observation["available_actions"]] = 1
+    info_offset += len(actions.FUNCTIONS)
 
-    # Single select information:
-    #     unit_type, player_relative, health, shields,
-    #     energy, transport_slots_taken, build_progress
-    single_obs_len = len(obs.observation["single_select"][0])
-    for offset in range(single_obs_len):
-        feature = obs.observation["single_select"][0][offset]
-        # Take the log of numerical data to keep numbers low
-        if ((2 <= offset <= 4) or offset == 6) and feature > 0:
-            info[0, len(actions.FUNCTIONS) + player_obs_len + offset] = math.log(feature)
-        else:
-            info[0, len(actions.FUNCTIONS) + player_obs_len + offset] = feature
+    info, _ = append_info_obs(
+        info,
+        info_offset,
+        obs.observation["single_select"]
+        # categorical_indices=[0, 1]
+    )
 
-    # TODO:
-    #   Add control groups
-    #   Add multi-select
-    #   Add cargo
-    #   Add build_queue
+    info_offset += 7
+
+    # info, _ = append_info_obs(
+    #     info,
+    #     info_offset,
+    #     obs.observation["multi_select"]
+    #     # categorical_indices=[0, 1]
+    # )
+
+    # info_offset += 7*400
+    #
+    # info, _ = append_info_obs(
+    #     info,
+    #     info_offset,
+    #     obs.observation["cargo"]
+    #     # categorical_indices=[0, 1]
+    # )
+    #
+    # info_offset += 7*8
+    #
+    # info, info_offset = append_info_obs(
+    #     info,
+    #     info_offset,
+    #     obs.observation["cargo_slots_available"]
+    #     # categorical_indices=[0, 1]
+    # )
+    #
+    # info, _ = append_info_obs(
+    #     info,
+    #     info_offset,
+    #     obs.observation["build_queue"]
+    #     # categorical_indices=[0, 1]
+    # )
+    #
+    # info_offset += 7*5
+    #
+    # info, info_offset = append_info_obs(
+    #     info,
+    #     info_offset,
+    #     obs.observation["control_groups"]
+    #     # categorical_indices=[0, 1]
+    # )
 
     return info
 
 
-def preprocess_minimap(minimap):
-    layers = []
-    assert minimap.shape[0] == len(features.MINIMAP_FEATURES)
-    for i in range(len(features.MINIMAP_FEATURES)):
-        if i == _MINIMAP_PLAYER_ID:
-            layers.append(minimap[i:i + 1] / features.MINIMAP_FEATURES[i].scale)
-        elif features.MINIMAP_FEATURES[i].type == features.FeatureType.SCALAR:
-            layers.append(minimap[i:i + 1] / features.MINIMAP_FEATURES[i].scale)
+def append_info_obs(info, info_offset, observation, categorical_indices=None):
+    if categorical_indices is None:
+        categorical_indices = []
+    for i, feature in enumerate(observation):
+        if not np.isscalar(feature):
+            for j, attribute in enumerate(feature):
+                offset = info_offset + j + i * len(feature)
+                if j not in categorical_indices and attribute > 0:
+                    info[0, offset] = np.log(attribute)
+                else:
+                    info[0, offset] = attribute
+        # Take the log of numerical data to keep numbers low
+        elif i not in categorical_indices and feature > 0:
+            info[0, info_offset + i] = np.log(feature)
         else:
-            layer = np.zeros([features.MINIMAP_FEATURES[i].scale, minimap.shape[1], minimap.shape[2]], dtype=np.float32)
-            for j in range(features.MINIMAP_FEATURES[i].scale):
-                indy, indx = (minimap[i] == j).nonzero()
-                layer[j, indy, indx] = 1
+            info[0, info_offset + i] = feature
+    info_offset += len(observation)
+
+    return info, info_offset
+
+
+# According to O. Vinyals et al. (2017) 4.3: Input pre-processing:
+#   Scalars:     log transformation
+#   Categorical: one-hot encoding in channel dimension
+#
+# Minimap Features:
+#     feature:          (scale, type)
+#     height_map:       (256,   SCALAR)
+#     visibility_map:   (4,     CATEGORICAL)
+#     creep:            (2,     CATEGORICAL)
+#     camera:           (2,     CATEGORICAL)
+#     player_id:        (17,    CATEGORICAL)
+#     player_relative:  (5,     CATEGORICAL)
+#     selected:         (2,     CATEGORICAL)
+#
+#   Total channels: 33
+#
+# Screen Features:
+#     feature:              (scale, type)
+#     height_map:           (256,   SCALAR)
+#     visibility_map:       (4,     CATEGORICAL)
+#     creep:                (2,     CATEGORICAL)
+#     power:                (2,     CATEGORICAL)
+#     player_id:            (17,    CATEGORICAL)
+#     player_relative:      (5,     CATEGORICAL)
+#     unit_type:            (1850,  CATEGORICAL)
+#     selected:             (2,     CATEGORICAL)
+#     unit_hit_points:      (1600,  SCALAR)
+#     unit_hit_points_ratio:(256,   SCALAR)
+#     unit_energy:          (1000,  SCALAR)
+#     unit_energy_ratio:    (256,   SCALAR)
+#     unit_shields:         (1000,  SCALAR)
+#     unit_shields_ratio:   (256,   SCALAR)
+#     unit_density:         (16,    SCALAR)
+#     unit_density_aa:      (256,   SCALAR)
+#     effects:              (16,    CATEGORICAL)
+#
+#   Total channels: 1907
+def preprocess_spatial_features(feature_layers, feature_layers_info, forced_scalars=None, excluded_features=None):
+    """
+    Args:
+        feature_layers: Minimap or Screen attributes of SC2 observation dictionary
+        feature_layers_info: pySC2 definitions for Minimap or Screen features
+        forced_scalars: A list containing categorical feature layers to be treated as scalars
+        excluded_features: A list containing features to exclude
+    Returns:
+        An array of shape
+            (scalar features + categorical feature scales, screen_size or minimap_size, screen_size or minimap_size)
+    """
+    if forced_scalars is None:
+        forced_scalars = []
+    if excluded_features is None:
+        excluded_features = []
+    layers = []
+    assert feature_layers.shape[0] == len(feature_layers_info)
+    for i, feature_layer in enumerate(feature_layers_info):
+        if i in excluded_features:
+            continue
+        if feature_layer.type == features.FeatureType.SCALAR or i in forced_scalars:
+            layers.append(np.ma.log(feature_layers[i:i+1]))
+        elif i in forced_scalars:
+            layers.append(feature_layers[i:i+1]/feature_layer.scale)
+        elif feature_layer.type == features.FeatureType.CATEGORICAL:
+            layer = np.zeros([feature_layer.scale, feature_layers.shape[1], feature_layers.shape[2]], dtype=np.float32)
+            for j in range(feature_layer.scale):
+                y, x = (feature_layers[i] == j).nonzero()
+                layer[j, y, x] = 1
             layers.append(layer)
     return np.concatenate(layers, axis=0)
-
-
-def preprocess_screen(screen):
-    layers = []
-    assert screen.shape[0] == len(features.SCREEN_FEATURES)
-    for i in range(len(features.SCREEN_FEATURES)):
-        if i == _SCREEN_PLAYER_ID or i == _SCREEN_UNIT_TYPE:
-            layers.append(screen[i:i + 1] / features.SCREEN_FEATURES[i].scale)
-        elif features.SCREEN_FEATURES[i].type == features.FeatureType.SCALAR:
-            layers.append(screen[i:i + 1] / features.SCREEN_FEATURES[i].scale)
-        else:
-            layer = np.zeros([features.SCREEN_FEATURES[i].scale, screen.shape[1], screen.shape[2]], dtype=np.float32)
-            for j in range(features.SCREEN_FEATURES[i].scale):
-                indy, indx = (screen[i] == j).nonzero()
-                layer[j, indy, indx] = 1
-            layers.append(layer)
-    return np.concatenate(layers, axis=0)
-
-
-def minimap_channel_size():
-    c = 0
-    for i in range(len(features.MINIMAP_FEATURES)):
-        if i == _MINIMAP_PLAYER_ID:
-            c += 1
-        elif features.MINIMAP_FEATURES[i].type == features.FeatureType.SCALAR:
-            c += 1
-        else:
-            c += features.MINIMAP_FEATURES[i].scale
-    return c
-
-
-def screen_channel_size():
-    c = 0
-    for i in range(len(features.SCREEN_FEATURES)):
-        if i == _SCREEN_PLAYER_ID or i == _SCREEN_UNIT_TYPE:
-            c += 1
-        elif features.SCREEN_FEATURES[i].type == features.FeatureType.SCALAR:
-            c += 1
-        else:
-            c += features.SCREEN_FEATURES[i].scale
-    return c
-
-
-def structured_channel_size():
-    # Arbitrary upper bound for structured data
-    # TODO: Look into this
-    return 4096
-
-
-def normalized_columns_initializer(std=1.0):
-    def _initializer(shape, dtype=None, partition_info=None):
-        out = np.random.randn(*shape).astype(np.float32)
-        out *= std / np.sqrt(np.square(out).sum(axis=0, keepdims=True))
-        return tf.constant(out)
-    return _initializer
 
 
 def get_action_arguments(act_id, target):

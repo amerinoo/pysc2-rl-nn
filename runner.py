@@ -78,6 +78,7 @@ class Runner(object):
                     logging.info(
                         "{}: step {}/{}".format(self.agent.name, self.agent.steps, self.max_local_steps))
                     yield replay_buffer, is_done, global_step
+                    replay_buffer = []
                 if is_done:
                     self._reset()
                     break
@@ -103,13 +104,17 @@ class Runner(object):
                     # Copy parameters from the global networks
                     self.agent.session.run(self.agent.copy_params_op)
 
+                    replay_buffer_set = []
                     # Collect some experience
                     for replay_buffer, is_done, global_step in self._run_n_steps(self.global_step_counter):
+                        # replay_buffer_set.append(replay_buffer)
                         if self.is_training:
-                            # if not UPDATE_LOCK.locked():
+                            # if not UPDATE_LOCK.locked() or is_done:
                             with UPDATE_LOCK:
                                 logging.info("{}: UPDATE_LOCK acquired. Updating...".format(self.agent.name))
+                                # for replay in replay_buffer_set:
                                 self.agent.update(replay_buffer)
+                                # full_replay_buffer = []
                             logging.info("{}: UPDATE_LOCK released!".format(self.agent.name))
 
                             if is_done:

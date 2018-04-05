@@ -79,7 +79,7 @@ class Worker(BaseAgent):
                     )
                 else:
                     self.optimizer = Optimizer(
-                        "single", 1e-2, self.policy_net.loss + self.value_net.loss
+                        "single", 1e-3, self.policy_net.loss + self.value_net.loss
                     )
 
                 # Create op: Copy global variables
@@ -167,7 +167,7 @@ class Worker(BaseAgent):
 
         # Resize to provided resolution
         coords = [int(target // self.s_size), int(target % self.s_size)]
-        print(coords, "\t", policy["spatial"][target])
+        # print(coords, "\t", policy["spatial"][target])
 
         return act_id, coords
 
@@ -229,15 +229,13 @@ class Worker(BaseAgent):
 
             # Update reward
             reward = int(obs.observation["score_cumulative"][0]) + self.discount_factor * reward
+
             policy_target = (reward - self._value_net_predict(obs))
 
             policy_targets[i] = policy_target   # Append advantage
             value_targets[i] = reward           # Append discounted reward
 
             # Append selected action
-            valid_actions = obs.observation["available_actions"]
-            valid_non_spatial_actions[i, valid_actions] = 1
-            # non_spatial_actions_selected[i, act_id] = 1
             non_spatial_actions_selected[i] = act_id + (len(actions.FUNCTIONS) * i)
 
             args = actions.FUNCTIONS[act_id].args
@@ -259,7 +257,6 @@ class Worker(BaseAgent):
             self.policy_net.actions["spatial"]: spatial_actions_selected,
             self.policy_net.actions["non_spatial"]: non_spatial_actions_selected,
             self.policy_net.targets: policy_targets,
-            self.policy_net.valid_actions: valid_non_spatial_actions,
             self.features["minimap"]: minimaps,
             self.features["screen"]: screens,
             self.features["info"]: infos,
