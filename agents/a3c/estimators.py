@@ -3,7 +3,7 @@ import tensorflow.contrib.layers as layers
 import pysc2.lib.actions as actions
 
 
-class Estimator(object):
+class PolicyEstimator(object):
     def __init__(self, state, fc, summarize=False):
         self.state = state
         self.fc = fc
@@ -97,12 +97,12 @@ class Estimator(object):
 
             # Policy Loss: L = -(log(π(s)) * A(s)) - β*H(π) : over batched states
             self.spatial_losses = \
-                -(tf.log(self.picked_spatial_probs) * self.targets) + 0.01 * self.spatial_entropy
+                (tf.log(self.picked_spatial_probs) * self.targets) + 0.01 * self.spatial_entropy
             self.non_spatial_losses = \
                 -(tf.log(self.picked_non_spatial_probs) * self.targets) + 0.01 * self.non_spatial_entropy
-            self.loss = tf.reduce_sum([
-                tf.reduce_sum(self.spatial_losses),
-                tf.reduce_sum(self.non_spatial_losses)
+            self.loss = tf.reduce_mean([
+                tf.reduce_mean(self.spatial_losses),
+                tf.reduce_mean(self.non_spatial_losses)
             ], name="policy_loss")
 
         if summarize:
@@ -138,7 +138,7 @@ class ValueEstimator(object):
             )
 
             self.losses = tf.squared_difference(self.prediction, self.targets)
-            self.loss = tf.reduce_sum(self.losses, name="value_loss")
+            self.loss = tf.reduce_mean(self.losses, name="value_loss")
 
             if summarize:
                 self.summaries.append(tf.summary.scalar("max_value", tf.reduce_max(self.prediction)))
