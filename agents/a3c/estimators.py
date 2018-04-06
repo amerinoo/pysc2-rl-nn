@@ -117,7 +117,7 @@ class PolicyEstimator(object):
             self.action_probs_log = self.valid["spatial"] * self.spatial_probs_log * self.non_spatial_probs_log
 
             # Policy Loss: L = -(log(π(s)) * A(s)) - β*H(π) : over batched states
-            self.loss = tf.reduce_mean(self.action_probs_log * self.advantages)  # + 0.01 * self.entropy_mean
+            self.loss = tf.reduce_mean(self.action_probs_log * self.advantages) + 0.01 * self.entropy_mean
 
         if summarize:
             self.summaries.append(tf.summary.histogram('spatial_action_policy', self.clipped_prediction["spatial"]))
