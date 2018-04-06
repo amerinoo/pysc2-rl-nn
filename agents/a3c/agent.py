@@ -35,7 +35,7 @@ def make_env():
 
 
 class A3CAgent(base_agent.BaseAgent):
-    def __init__(self, is_training, m_size, s_size, network_name, map_name, session, summary_writer, name="a3c_agent"):
+    def __init__(self, is_training, m_size, s_size, network_name, map_name, session, summary_writer, snapshot_path, name="a3c_agent"):
         super().__init__()
         self.name = name
         self.is_training = is_training
@@ -43,6 +43,7 @@ class A3CAgent(base_agent.BaseAgent):
 
         self.session = session
         self.summary_writer = summary_writer
+        self.snapshot_path = snapshot_path
         self.map_name = map_name
 
         # Dimensions
@@ -71,23 +72,29 @@ class A3CAgent(base_agent.BaseAgent):
                 value_net = ValueEstimator(fc)
                 if FLAGS.dual_msprop:
                     optimizers = [
-                        Optimizer("global_policy", 1e-3, policy_net.loss),
-                        Optimizer("global_value", 1e-3, value_net.loss)
+                        Optimizer("global_policy", FLAGS.learning_rate, policy_net.loss),
+                        Optimizer("global_value", FLAGS.learning_rate, value_net.loss)
                     ]
                 else:
                     optimizers = [
-                        Optimizer("global", 1e-3, policy_net.loss + value_net.loss)
+                        Optimizer("global", FLAGS.learning_rate, policy_net.loss + value_net.loss)
                     ]
+
+            self.saver = tf.train.Saver(keep_checkpoint_every_n_hours=1, max_to_keep=3)
+            start_episode = self.load_model(self.snapshot_path)
 
             # Global iterators
             global_step_counter = itertools.count()
-            global_episode_counter = itertools.count()
+            global_episode_counter = itertools.count(start_episode)
+
 
             # Create worker graphs
             for worker_id in range(worker_count):
                 worker_summary_writer = None
+                saver = None
                 if worker_id == 0:
                     worker_summary_writer = self.summary_writer
+                    saver = self.saver
 
                 worker = Worker(
                     name="{}_{}".format(self.name, worker_id),
@@ -98,6 +105,7 @@ class A3CAgent(base_agent.BaseAgent):
                     global_optimizers=optimizers,
                     network=network,
                     map_name=self.map_name,
+                    learning_rate=FLAGS.learning_rate,
                     discount_factor=FLAGS.discount,
                     summary_writer=worker_summary_writer
                 )
@@ -112,19 +120,15 @@ class A3CAgent(base_agent.BaseAgent):
                     update_period=FLAGS.max_update_steps,
                     max_local_steps=FLAGS.max_steps,
                     max_global_steps=FLAGS.max_global_steps,
-                    max_global_episodes=FLAGS.num_episodes
+                    max_global_episodes=FLAGS.num_episodes,
+                    saver=saver
                 )
                 self.runners.append(runner)
-
-            # self.saver = tf.train.Saver(keep_checkpoint_every_n_hours=0.16, max_to_keep=3)
 
     def run(self):
         with self.session as session:
             session.run(tf.global_variables_initializer())
             coord = tf.train.Coordinator()
-
-            # Load previous checkpoint here
-            # ...
 
             # Start worker threads
             threads = []
@@ -138,3 +142,11 @@ class A3CAgent(base_agent.BaseAgent):
                 time.sleep(FLAGS.stagger)
 
             coord.join(threads)
+
+    def load_model(self, path):
+        checkpoint = tf.train.latest_checkpoint(path)
+        if checkpoint:
+            self.saver.restore(self.session, checkpoint)
+            return int(checkpoint.split('-')[-1])
+        tf.logging.info("No previous checkpoints found!")
+        return 0

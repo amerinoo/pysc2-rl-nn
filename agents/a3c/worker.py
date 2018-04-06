@@ -8,6 +8,7 @@ import util
 
 from agents.a3c.estimators import PolicyEstimator, ValueEstimator, Optimizer
 
+
 # noinspection PyCompatibility
 class Worker(BaseAgent):
     def __init__(self,
@@ -19,12 +20,14 @@ class Worker(BaseAgent):
                  global_optimizers,
                  network,
                  map_name,
-                 discount_factor=0.99,
+                 learning_rate,
+                 discount_factor,
                  summary_writer=None):
 
         super().__init__()
         self.name = name
         self.discount_factor = discount_factor
+        self.learning_rate = learning_rate
         self.global_step = tf.train.get_global_step()
 
         self.device = device
@@ -72,14 +75,14 @@ class Worker(BaseAgent):
                 # TODO: if is_training
                 if self.dual_msprop:
                     self.policy_optimizer = Optimizer(
-                        "policy", 1e-3, self.policy_net.loss
+                        "policy", self.learning_rate, self.policy_net.loss
                     )
                     self.value_optimizer = Optimizer(
-                        "value", 1e-3, self.value_net.loss
+                        "value", self.learning_rate, self.value_net.loss
                     )
                 else:
                     self.optimizer = Optimizer(
-                        "single", 1e-3, self.policy_net.loss + self.value_net.loss
+                        "single", self.learning_rate, self.policy_net.loss + self.value_net.loss
                     )
 
                 # Create op: Copy global variables
@@ -95,7 +98,7 @@ class Worker(BaseAgent):
                 else:
                     self.single_train_op = util.make_train_op(self.optimizer, self.global_optimizer)
 
-                # self.saver = tf.train.Saver(max_to_keep=100)
+                self.saver = tf.train.Saver(max_to_keep=10)
 
     def _policy_net_predict(self, obs):
         feed_dict = {
@@ -193,22 +196,23 @@ class Worker(BaseAgent):
         # Compute value of last observation
         obs = replay_buffer[-1][-1]
 
-        # If obs wasn't done, bootstrap from last state
+        # R = 0 for terminal s_t, V(s_t, θ'_v) for non-terminal s_t
+        # i.e. bootstrap from last state
         reward = 0.0
         if not obs.last():
             reward = self._value_net_predict(obs)
 
         # Preallocate array sizes for _*speed*_
         value_targets = np.zeros([len(replay_buffer)], dtype=np.float32)
-        policy_targets = np.zeros([len(replay_buffer)], dtype=np.float32)
+        advantages = np.zeros([len(replay_buffer)], dtype=np.float32)
         value_targets[-1] = reward
 
-        # valid_spatial_actions = np.zeros([len(replay_buffer)], dtype=np.int32)
-        # spatial_actions_selected = np.zeros([len(replay_buffer), self.s_size ** 2], dtype=np.int32)
-        spatial_actions_selected = np.zeros(len(replay_buffer), dtype=np.int32)
-        valid_non_spatial_actions = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.int32)
-        # non_spatial_actions_selected = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.int32)
-        non_spatial_actions_selected = np.zeros(len(replay_buffer), dtype=np.int32)
+        valid_spatial_actions = np.zeros([len(replay_buffer)], dtype=np.float32)
+        spatial_actions_selected = np.zeros([len(replay_buffer), self.s_size ** 2], dtype=np.float32)
+        # spatial_actions_selected = np.zeros(len(replay_buffer), dtype=np.float32)
+        valid_non_spatial_actions = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
+        non_spatial_actions_selected = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
+        # non_spatial_actions_selected = np.zeros(len(replay_buffer), dtype=np.float32)
 
         # TODO: Preallocate sizes
         minimaps = []
@@ -223,27 +227,39 @@ class Worker(BaseAgent):
             screens.append(util.screen_obs(obs))
             infos.append(util.info_obs(obs))
 
+            # Update reward
+            # R <- r_i + γR
+            reward = int(obs.observation["score_cumulative"][0]) + self.discount_factor * reward
+
+            # advantage = R - V(s_i; θ'_v)
+            advantage = (reward - self._value_net_predict(obs))
+
+            advantages[i] = advantage           # Append advantage
+            value_targets[i] = reward           # Append discounted reward
+
             # Get selected action
             act_id = action.function
             act_args = action.arguments
 
-            # Update reward
-            reward = int(obs.observation["score_cumulative"][0]) + self.discount_factor * reward
-
-            policy_target = (reward - self._value_net_predict(obs))
-
-            policy_targets[i] = policy_target   # Append advantage
-            value_targets[i] = reward           # Append discounted reward
-
             # Append selected action
-            non_spatial_actions_selected[i] = act_id + (len(actions.FUNCTIONS) * i)
+            valid_actions = obs.observation["available_actions"]
+            valid_non_spatial_actions[i, valid_actions] = 1
+            non_spatial_actions_selected[i, act_id] = 1
+            # non_spatial_actions_selected[i] = act_id + (len(actions.FUNCTIONS) * i)
+
+            # args = actions.FUNCTIONS[act_id].args
+            # for arg, act_arg in zip(args, act_args):
+            #     if arg.name in ('screen', 'minimap', 'screen2'):
+            #         ind = act_arg[1] * self.s_size + act_arg[0]
+            #         spatial_actions_selected[i] = ind + ((self.s_size ** 2) * i)
+            #         # spatial_actions_selected[i, ind] = 1
 
             args = actions.FUNCTIONS[act_id].args
             for arg, act_arg in zip(args, act_args):
                 if arg.name in ('screen', 'minimap', 'screen2'):
                     ind = act_arg[1] * self.s_size + act_arg[0]
-                    spatial_actions_selected[i] = ind + ((self.s_size ** 2) * i)
-                    # spatial_actions_selected[i, ind] = 1
+                    valid_spatial_actions[i] = 1
+                    spatial_actions_selected[i, ind] = 1
 
         minimaps = np.concatenate(minimaps, axis=0)
         screens = np.concatenate(screens, axis=0)
@@ -254,13 +270,12 @@ class Worker(BaseAgent):
             self.features["minimap"]: minimaps,
             self.features["screen"]: screens,
             self.features["info"]: infos,
+            self.policy_net.valid["spatial"]: valid_spatial_actions,
+            self.policy_net.valid["non_spatial"]: valid_non_spatial_actions,
             self.policy_net.actions["spatial"]: spatial_actions_selected,
             self.policy_net.actions["non_spatial"]: non_spatial_actions_selected,
-            self.policy_net.targets: policy_targets,
-            self.features["minimap"]: minimaps,
-            self.features["screen"]: screens,
-            self.features["info"]: infos,
-            self.value_net.targets: value_targets
+            self.policy_net.advantages: advantages,
+            self.value_net.targets: value_targets,
         }
 
         if self.dual_msprop:
@@ -307,11 +322,3 @@ class Worker(BaseAgent):
             self.summary_writer.flush()
 
         return pnet_loss, vnet_loss
-
-    def save_model(self, path, counter):
-        self.saver.save(self.session, path + '/model.pkl', counter)
-
-    def load_model(self, path):
-        checkpoint = tf.train.get_checkpoint_state(path)
-        self.saver.restore(self.session, checkpoint.model_checkpoint_path)
-        return int(checkpoint.model_checkpoint_path.split('-')[-1])

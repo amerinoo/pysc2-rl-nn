@@ -11,27 +11,39 @@ class PolicyEstimator(object):
         self.summaries = []
 
         # Target placeholders
-        self.targets = tf.placeholder(
+        self.advantages = tf.placeholder(
             tf.float32, [None],
             name='value'
         )
 
+        # Valid action masks
+        self.valid = {
+            "spatial": tf.placeholder(
+                tf.float32, [None],
+                name='valid_spatial_actions'
+            ),
+            "non_spatial": tf.placeholder(
+                tf.float32, [None, len(actions.FUNCTIONS)],
+                name='valid_non_spatial_actions'
+            )
+        }
+
         # Action placeholders
         self.actions = {
             "spatial": tf.placeholder(
-                # tf.int32, [None, 64**2],    # TODO: Temporary constant
-                tf.int32, [None],
+                tf.float32, [None, 64**2],    # TODO: Temporary constant
+                # tf.int32, [None],
                 name='spatial_action_selected'
             ),
             "non_spatial": tf.placeholder(
-                # tf.int32, [None, len(actions.FUNCTIONS)],
-                tf.int32, [None],
+                tf.float32, [None, len(actions.FUNCTIONS)],
+                # tf.int32, [None],
                 name='non_spatial_action_selected'
             )
         }
 
         # Batch size = number of steps fed to network
-        batch_size = tf.shape(self.targets)[0]
+        batch_size = tf.shape(self.advantages)[0]
 
         with tf.variable_scope("policy_net"):
             self.prediction = {
@@ -44,7 +56,7 @@ class PolicyEstimator(object):
                                 kernel_size=1,
                                 stride=1,
                                 activation_fn=None,
-                                scope='spatial_probs'
+                                scope='spatial_policy'
                             )
                         )
                     ),
@@ -53,11 +65,12 @@ class PolicyEstimator(object):
                         self.fc,
                         num_outputs=len(actions.FUNCTIONS),
                         activation_fn=tf.nn.softmax,
-                        scope='non_spatial_probs'
+                        scope='non_spatial_policy'
                     )
             }
 
             # H(π) = -Σ(π(s) * log(π(s))) : over batched states
+            # Clipping is done to prevent division by 0 and log(0)
             self.clipped_prediction = {
                 "spatial": tf.clip_by_value(self.prediction["spatial"], 1e-10, 1.),
                 "non_spatial": tf.clip_by_value(self.prediction["non_spatial"], 1e-10, 1.)
@@ -80,39 +93,37 @@ class PolicyEstimator(object):
                 name="entropy_mean"
             )
 
-            self.picked_non_spatial_probs = tf.gather(
-                tf.reshape(
-                    self.clipped_prediction["non_spatial"], [batch_size * len(actions.FUNCTIONS)]
-                ),
-                self.actions["non_spatial"],
-                name="gather_non_spatial_probs"
+            self.spatial_probs = tf.reduce_sum(
+                self.clipped_prediction["spatial"] * self.actions["spatial"],
+                axis=1
             )
-            self.picked_spatial_probs = tf.gather(
-                tf.reshape(
-                    self.clipped_prediction["spatial"], [-1]
-                ),
-                self.actions["spatial"],
-                name="gather_spatial_probs"
+            self.spatial_probs_log = tf.log(tf.clip_by_value(self.spatial_probs, 1e-10, 1.))
+
+            self.non_spatial_probs = tf.reduce_sum(
+                self.clipped_prediction["non_spatial"] * self.actions["non_spatial"],
+                axis=1
             )
+            self.valid_non_spatial_probs = tf.reduce_sum(
+                self.clipped_prediction["non_spatial"] * self.valid["non_spatial"],
+                axis=1
+            )
+            self.valid_non_spatial_probs = tf.clip_by_value(self.valid_non_spatial_probs, 1e-10, 1.)
+            self.non_spatial_probs = self.non_spatial_probs / self.valid_non_spatial_probs
+            self.non_spatial_probs_log = tf.log(tf.clip_by_value(self.non_spatial_probs, 1e-10, 1.))
+
+            self.action_probs_log = self.valid["spatial"] * self.spatial_probs_log * self.non_spatial_probs_log
 
             # Policy Loss: L = -(log(π(s)) * A(s)) - β*H(π) : over batched states
-            self.spatial_losses = \
-                (tf.log(self.picked_spatial_probs) * self.targets) + 0.01 * self.spatial_entropy
-            self.non_spatial_losses = \
-                -(tf.log(self.picked_non_spatial_probs) * self.targets) + 0.01 * self.non_spatial_entropy
-            self.loss = tf.reduce_mean([
-                tf.reduce_mean(self.spatial_losses),
-                tf.reduce_mean(self.non_spatial_losses)
-            ], name="policy_loss")
+            self.loss = tf.reduce_mean(self.action_probs_log * self.advantages) + 0.01 * self.entropy_mean
 
         if summarize:
-            self.summaries.append(tf.summary.histogram('spatial_action_policy', self.prediction["spatial"]))
-            self.summaries.append(tf.summary.histogram('non_spatial_action_policy', self.prediction["non_spatial"]))
+            self.summaries.append(tf.summary.histogram('spatial_action_policy', self.clipped_prediction["spatial"]))
+            self.summaries.append(tf.summary.histogram('non_spatial_action_policy', self.clipped_prediction["non_spatial"]))
             self.summaries.append(tf.summary.scalar('spatial_entropy', tf.reduce_mean(self.spatial_entropy)))
             self.summaries.append(tf.summary.scalar('non_spatial_entropy', tf.reduce_mean(self.non_spatial_entropy)))
             self.summaries.append(tf.summary.scalar('entropy', self.entropy_mean))
-            self.summaries.append(tf.summary.histogram('spatial_loss', self.spatial_losses))
-            self.summaries.append(tf.summary.histogram('non_spatial_loss', self.non_spatial_losses))
+            # self.summaries.append(tf.summary.histogram('spatial_loss', self.spatial_losses))
+            # self.summaries.append(tf.summary.histogram('non_spatial_loss', self.non_spatial_losses))
             self.summaries.append(tf.summary.scalar('policy_loss', self.loss))
             self.summaries = tf.summary.merge(self.summaries)
 

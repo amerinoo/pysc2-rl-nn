@@ -152,7 +152,7 @@ def info_obs(obs):
     #     info_offset,
     #     obs.observation["game_loop"]
     # )
-    #
+
     # info, info_offset = append_info_obs(
     #     info,
     #     info_offset,
@@ -179,32 +179,32 @@ def info_obs(obs):
     # )
 
     # info_offset += 7*400
-    #
+
     # info, _ = append_info_obs(
     #     info,
     #     info_offset,
     #     obs.observation["cargo"]
     #     # categorical_indices=[0, 1]
     # )
-    #
+
     # info_offset += 7*8
-    #
+
     # info, info_offset = append_info_obs(
     #     info,
     #     info_offset,
     #     obs.observation["cargo_slots_available"]
     #     # categorical_indices=[0, 1]
     # )
-    #
+
     # info, _ = append_info_obs(
     #     info,
     #     info_offset,
     #     obs.observation["build_queue"]
     #     # categorical_indices=[0, 1]
     # )
-    #
+
     # info_offset += 7*5
-    #
+
     # info, info_offset = append_info_obs(
     #     info,
     #     info_offset,

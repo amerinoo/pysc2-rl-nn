@@ -17,7 +17,7 @@ FLAGS = flags.FLAGS
 # Training Flags
 flags.DEFINE_bool("training", True, "Whether to train agents.")
 flags.DEFINE_bool("continuation", False, "Continuously training.")
-flags.DEFINE_float("learning_rate", 1e-3, "Learning rate for training.")
+flags.DEFINE_float("learning_rate", 0.003, "Learning rate for training.")
 flags.DEFINE_float("discount", 0.9, "Discount rate for future rewards.")
 flags.DEFINE_float("max_update_steps", 0, "Maximum number of steps before performing an update (0 for full episode).")
 flags.DEFINE_integer("max_steps", int(0), "Max steps per episode (0 for no max).")
@@ -95,15 +95,12 @@ def _main(unused_argv):
                       FLAGS.network,
                       FLAGS.map,
                       session,
-                      summary_writer)
+                      summary_writer,
+                      SNAPSHOT_PATH)
 
     # Initialize agent and run
     agent.initialize(DEVICE_CPU, PARALLEL_COUNT)
     agent.run()
-
-    # # if not FLAGS.training or FLAGS.continuation:
-    # #     global COUNTER
-    # #     COUNTER = agent.load_model(SNAPSHOT_PATH)
 
     if FLAGS.profile:
         print(stopwatch.sw)
