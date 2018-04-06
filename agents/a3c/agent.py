@@ -57,6 +57,10 @@ class A3CAgent(base_agent.BaseAgent):
         self.workers = []
         self.runners = []
 
+        # Global iterators
+        self.global_step_counter = itertools.count()
+        self.global_episode_counter = itertools.count()
+
         self.saver = None
 
     def initialize(self, device, worker_count):
@@ -81,12 +85,6 @@ class A3CAgent(base_agent.BaseAgent):
                     ]
 
             self.saver = tf.train.Saver(keep_checkpoint_every_n_hours=1, max_to_keep=3)
-            start_episode = self.load_model(self.snapshot_path)
-
-            # Global iterators
-            global_step_counter = itertools.count()
-            global_episode_counter = itertools.count(start_episode)
-
 
             # Create worker graphs
             for worker_id in range(worker_count):
@@ -115,8 +113,8 @@ class A3CAgent(base_agent.BaseAgent):
                     agent=worker,
                     env=make_env(),
                     is_training=self.is_training,
-                    global_step_counter=global_step_counter,
-                    global_episode_counter=global_episode_counter,
+                    global_step_counter=self.global_step_counter,
+                    global_episode_counter=self.global_episode_counter,
                     update_period=FLAGS.max_update_steps,
                     max_local_steps=FLAGS.max_steps,
                     max_global_steps=FLAGS.max_global_steps,
@@ -129,6 +127,9 @@ class A3CAgent(base_agent.BaseAgent):
         with self.session as session:
             session.run(tf.global_variables_initializer())
             coord = tf.train.Coordinator()
+
+            start_episode = self.load_model(self.snapshot_path)
+            self.global_episode_counter = itertools.count(start_episode)
 
             # Start worker threads
             threads = []

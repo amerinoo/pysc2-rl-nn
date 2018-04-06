@@ -170,7 +170,6 @@ class Worker(BaseAgent):
 
         # Resize to provided resolution
         coords = [int(target // self.s_size), int(target % self.s_size)]
-        # print(coords, "\t", policy["spatial"][target])
 
         return act_id, coords
 
@@ -179,7 +178,7 @@ class Worker(BaseAgent):
         valid_actions = obs.observation['available_actions']
 
         # e-greedy
-        # if np.random.random() < 0.3:
+        # if np.random.random() < 0.15:
         #     act_id, target = self._exploit_random(valid_actions)
         # else:
         #     act_id, target = self._exploit_max(policy, valid_actions)
@@ -209,10 +208,8 @@ class Worker(BaseAgent):
 
         valid_spatial_actions = np.zeros([len(replay_buffer)], dtype=np.float32)
         spatial_actions_selected = np.zeros([len(replay_buffer), self.s_size ** 2], dtype=np.float32)
-        # spatial_actions_selected = np.zeros(len(replay_buffer), dtype=np.float32)
         valid_non_spatial_actions = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
         non_spatial_actions_selected = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
-        # non_spatial_actions_selected = np.zeros(len(replay_buffer), dtype=np.float32)
 
         # TODO: Preallocate sizes
         minimaps = []
@@ -245,14 +242,6 @@ class Worker(BaseAgent):
             valid_actions = obs.observation["available_actions"]
             valid_non_spatial_actions[i, valid_actions] = 1
             non_spatial_actions_selected[i, act_id] = 1
-            # non_spatial_actions_selected[i] = act_id + (len(actions.FUNCTIONS) * i)
-
-            # args = actions.FUNCTIONS[act_id].args
-            # for arg, act_arg in zip(args, act_args):
-            #     if arg.name in ('screen', 'minimap', 'screen2'):
-            #         ind = act_arg[1] * self.s_size + act_arg[0]
-            #         spatial_actions_selected[i] = ind + ((self.s_size ** 2) * i)
-            #         # spatial_actions_selected[i, ind] = 1
 
             args = actions.FUNCTIONS[act_id].args
             for arg, act_arg in zip(args, act_args):

@@ -70,18 +70,18 @@ class PolicyEstimator(object):
             }
 
             # H(π) = -Σ(π(s) * log(π(s))) : over batched states
-            # Clipping is done to prevent division by 0 and log(0)
+            # Clipping is done to prevent /0 and log(0)
             self.clipped_prediction = {
                 "spatial": tf.clip_by_value(self.prediction["spatial"], 1e-10, 1.),
                 "non_spatial": tf.clip_by_value(self.prediction["non_spatial"], 1e-10, 1.)
             }
 
             self.spatial_entropy = -tf.reduce_sum(
-                self.clipped_prediction["spatial"] * tf.log(self.clipped_prediction["spatial"]), 1,
+                self.prediction["spatial"] * tf.log(self.clipped_prediction["spatial"]), 1,
                 name="spatial_entropy"
             )
             self.non_spatial_entropy = -tf.reduce_sum(
-                self.clipped_prediction["non_spatial"] * tf.log(self.clipped_prediction["non_spatial"]), 1,
+                self.prediction["non_spatial"] * tf.log(self.clipped_prediction["non_spatial"]), 1,
                 name="non_spatial_entropy"
             )
 
@@ -93,28 +93,31 @@ class PolicyEstimator(object):
                 name="entropy_mean"
             )
 
+            # Mask taken spatial_action probabilities
             self.spatial_probs = tf.reduce_sum(
-                self.clipped_prediction["spatial"] * self.actions["spatial"],
+                self.prediction["spatial"] * self.actions["spatial"],
                 axis=1
             )
             self.spatial_probs_log = tf.log(tf.clip_by_value(self.spatial_probs, 1e-10, 1.))
 
+            # Mask taken non_spatial_action probabilities
             self.non_spatial_probs = tf.reduce_sum(
-                self.clipped_prediction["non_spatial"] * self.actions["non_spatial"],
+                self.prediction["non_spatial"] * self.actions["non_spatial"],
                 axis=1
             )
+
+            # Mask invalid action probabilities
             self.valid_non_spatial_probs = tf.reduce_sum(
-                self.clipped_prediction["non_spatial"] * self.valid["non_spatial"],
+                self.prediction["non_spatial"] * self.valid["non_spatial"],
                 axis=1
             )
-            self.valid_non_spatial_probs = tf.clip_by_value(self.valid_non_spatial_probs, 1e-10, 1.)
-            self.non_spatial_probs = self.non_spatial_probs / self.valid_non_spatial_probs
+            self.non_spatial_probs = self.non_spatial_probs * self.valid_non_spatial_probs
             self.non_spatial_probs_log = tf.log(tf.clip_by_value(self.non_spatial_probs, 1e-10, 1.))
 
             self.action_probs_log = self.valid["spatial"] * self.spatial_probs_log * self.non_spatial_probs_log
 
             # Policy Loss: L = -(log(π(s)) * A(s)) - β*H(π) : over batched states
-            self.loss = tf.reduce_mean(self.action_probs_log * self.advantages) + 0.01 * self.entropy_mean
+            self.loss = tf.reduce_mean(self.action_probs_log * self.advantages)  # + 0.01 * self.entropy_mean
 
         if summarize:
             self.summaries.append(tf.summary.histogram('spatial_action_policy', self.clipped_prediction["spatial"]))
