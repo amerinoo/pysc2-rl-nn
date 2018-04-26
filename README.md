@@ -21,5 +21,8 @@ A3C + FullyConv:
 https://github.com/H-Park/starcraft2ai/tree/master/A3C    
 https://github.com/pekaalto/sc2aibot    
 
+GA3C + Single optimizer for policy/value nets
+https://github.com/NVlabs/GA3C
+
 Model Checkpoints:    
 https://web.stanford.edu/class/cs20si/2017/lectures/notes_05.pdf    
