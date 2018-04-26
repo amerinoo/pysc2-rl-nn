@@ -2,14 +2,15 @@ import tensorflow as tf
 import numpy as np
 
 from pysc2.agents.base_agent import BaseAgent
-from pysc2.lib import actions
+from pysc2.lib import actions, stopwatch
 
-import util
+from common import util
 
-from agents.a3c.estimators import PolicyEstimator, ValueEstimator, Optimizer
+from agents.a3c.estimators import configure_estimators
+
+sw = stopwatch.StopWatch()
 
 
-# noinspection PyCompatibility
 class Worker(BaseAgent):
     def __init__(self,
                  name,
@@ -22,12 +23,16 @@ class Worker(BaseAgent):
                  map_name,
                  learning_rate,
                  discount_factor,
+                 eta,
+                 beta,
                  summary_writer=None):
 
         super().__init__()
         self.name = name
         self.discount_factor = discount_factor
         self.learning_rate = learning_rate
+        self.eta = eta
+        self.beta = beta
         self.global_step = tf.train.get_global_step()
 
         self.device = device
@@ -64,26 +69,15 @@ class Worker(BaseAgent):
     def _build_model(self, network, device):
         with tf.device(device):
             with tf.variable_scope(self.name):
-                # Obtain state representation and fullyConv from network
-                state, fc = network.build(self.features, summarize=self.summary_writer is not None)
-
-                # Build the rest of the network
-                self.policy_net = PolicyEstimator(
-                    state, fc, summarize=self.summary_writer is not None)
-                self.value_net = ValueEstimator(
-                    fc, summarize=self.summary_writer is not None)
-                # TODO: if is_training
-                if self.dual_msprop:
-                    self.policy_optimizer = Optimizer(
-                        "policy", self.learning_rate, self.policy_net.loss
-                    )
-                    self.value_optimizer = Optimizer(
-                        "value", self.learning_rate, self.value_net.loss
-                    )
-                else:
-                    self.optimizer = Optimizer(
-                        "single", self.learning_rate, self.policy_net.loss + self.value_net.loss
-                    )
+                self.policy_net, self.value_net, self.optimizer = configure_estimators(
+                    network,
+                    self.features,
+                    self.eta,
+                    self.beta,
+                    self.learning_rate,
+                    self.dual_msprop,
+                    self.summary_writer
+                )
 
                 # Create op: Copy global variables
                 self.copy_params_op = util.make_copy_params_op(
@@ -93,18 +87,19 @@ class Worker(BaseAgent):
 
                 # Create op: Update global variables with local losses
                 if self.dual_msprop:
-                    self.vnet_train_op = util.make_train_op(self.value_optimizer, self.global_value_optimizer)
+                    self.policy_optimizer = self.optimizer[0]
+                    self.value_optimizer = self.optimizer[1]
                     self.pnet_train_op = util.make_train_op(self.policy_optimizer, self.global_policy_optimizer)
+                    self.vnet_train_op = util.make_train_op(self.value_optimizer, self.global_value_optimizer)
                 else:
+                    self.optimizer = self.optimizer[0]
                     self.single_train_op = util.make_train_op(self.optimizer, self.global_optimizer)
-
-                self.saver = tf.train.Saver(max_to_keep=10)
 
     def _policy_net_predict(self, obs):
         feed_dict = {
              self.features["minimap"]: util.minimap_obs(obs),
              self.features["screen"]: util.screen_obs(obs),
-             self.features["info"]: util.info_obs(obs)
+             self.features["info"]: util.non_spatial_obs(obs, self.s_size)
         }
 
         # Get spatial/non_spatial policies
@@ -125,7 +120,7 @@ class Worker(BaseAgent):
         feed_dict = {
              self.features["minimap"]: util.minimap_obs(obs),
              self.features["screen"]: util.screen_obs(obs),
-             self.features["info"]: util.info_obs(obs)
+             self.features["info"]: util.non_spatial_obs(obs, self.s_size)
         }
 
         return self.session.run(self.value_net.prediction, feed_dict=feed_dict)
@@ -178,13 +173,14 @@ class Worker(BaseAgent):
         valid_actions = obs.observation['available_actions']
 
         # e-greedy
-        # if np.random.random() < 0.15:
-        #     act_id, target = self._exploit_random(valid_actions)
-        # else:
-        #     act_id, target = self._exploit_max(policy, valid_actions)
+        if np.random.random() < 0.3:
+            # act_id, target = self._exploit_random(valid_actions)
+            act_id, target = self._exploit_distribution(policy, valid_actions)
+        else:
+            act_id, target = self._exploit_max(policy, valid_actions)
 
         # policy-dependent, encourage exploration with entropy regularization
-        act_id, target = self._exploit_distribution(policy, valid_actions)
+        # act_id, target = self._exploit_distribution(policy, valid_actions)
         act_args = util.get_action_arguments(act_id, target)
 
         self.steps += 1
@@ -211,7 +207,6 @@ class Worker(BaseAgent):
         valid_non_spatial_actions = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
         non_spatial_actions_selected = np.zeros([len(replay_buffer), len(actions.FUNCTIONS)], dtype=np.float32)
 
-        # TODO: Preallocate sizes
         minimaps = []
         screens = []
         infos = []
@@ -222,7 +217,7 @@ class Worker(BaseAgent):
             # Update state
             minimaps.append(util.minimap_obs(obs))
             screens.append(util.screen_obs(obs))
-            infos.append(util.info_obs(obs))
+            infos.append(util.non_spatial_obs(obs, self.s_size))
 
             # Update reward
             # R <- r_i + γR

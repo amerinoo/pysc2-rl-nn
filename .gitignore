@@ -105,3 +105,4 @@ _*/
 snapshot/
 log/
 .idea/
+*.csv

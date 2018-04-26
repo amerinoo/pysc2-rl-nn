@@ -1,8 +1,7 @@
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
 
-import util
-
+from pysc2.lib import actions
 
 class FullyConv(object):
     def __init__(self, m_size, s_size):
@@ -11,70 +10,16 @@ class FullyConv(object):
         self.m_size = m_size
         self.s_size = s_size
 
-    def build(self, features, summarize=False):
-        # Extract features while preserving the dimensions
-
+    def build(self, features):
         # Minimap convolutions
-        m_preprocess = layers.conv2d(
-            tf.transpose(features["minimap"], [0, 2, 3, 1]),
-            num_outputs=1,
-            kernel_size=1,
-            stride=1,
-            padding="SAME",
-            scope="m_preprocess"
-        )
-
-        m_conv1 = layers.conv2d(
-            m_preprocess,
-            num_outputs=16,
-            kernel_size=5,
-            stride=1,
-            padding="SAME",
-            scope="m_conv1"
-        )
-
-        m_conv2 = layers.conv2d(
-            m_conv1,
-            num_outputs=32,
-            kernel_size=3,
-            stride=1,
-            padding="SAME",
-            scope="m_conv2"
-        )
-
-        # Screen convolutions
-        s_preprocess = layers.conv2d(
-            tf.transpose(features["screen"], [0, 2, 3, 1]),
-            num_outputs=1,
-            kernel_size=1,
-            stride=1,
-            padding="SAME",
-            scope="s_preprocess"
-        )
-
-        s_conv1 = layers.conv2d(
-            s_preprocess,
-            num_outputs=16,
-            kernel_size=5,
-            stride=1,
-            padding="SAME",
-            scope="s_conv1"
-        )
-
-        s_conv2 = layers.conv2d(
-            s_conv1,
-            num_outputs=32,
-            kernel_size=3,
-            stride=1,
-            padding="SAME",
-            scope="s_conv2"
-        )
+        m_conv = self.cnn_block(features["minimap"], scope="m")
+        s_conv = self.cnn_block(features["screen"], scope="s")
 
         # Create the state representation by concatenating on the channel axis
         state_representation = tf.concat([
-            m_conv2,
-            s_conv2,
-            tf.reshape(features["info"], [-1, self.s_size, self.s_size, 1])
+            m_conv,
+            s_conv,
+            tf.transpose(features["info"], [0, 2, 3, 1])
         ], axis=3, name="state_representation")
 
         fc = layers.fully_connected(
@@ -84,13 +29,59 @@ class FullyConv(object):
             scope='fully_conv_features',
         )
 
-        if summarize:
-            layers.summarize_activation(m_preprocess)
-            layers.summarize_activation(m_conv1)
-            layers.summarize_activation(m_conv2)
-            layers.summarize_activation(s_conv1)
-            layers.summarize_activation(s_conv2)
-            layers.summarize_activation(fc)
+        spatial_action = tf.nn.softmax(
+            layers.flatten(
+                layers.conv2d(
+                    state_representation,
+                    num_outputs=1,
+                    kernel_size=1,
+                    stride=1,
+                    activation_fn=None,
+                    scope='spatial_policy'
+                )
+            )
+        )
 
-        return state_representation, fc
+        non_spatial_action = layers.fully_connected(
+            fc,
+            num_outputs=len(actions.FUNCTIONS),
+            activation_fn=tf.nn.softmax,
+            scope='non_spatial_policy'
+        )
 
+        value = layers.fully_connected(
+            fc,
+            num_outputs=1,
+            activation_fn=None,
+            scope='value'
+        )
+
+        return spatial_action, non_spatial_action, value
+
+    def cnn_block(self, feature, scope):
+        preprocess = layers.conv2d(
+            tf.transpose(feature, [0, 2, 3, 1]),
+            num_outputs=1,
+            kernel_size=1,
+            stride=1,
+            padding="SAME",
+            scope="{}_preprocess".format(scope)
+        )
+
+        conv1 = layers.conv2d(
+            preprocess,
+            num_outputs=16,
+            kernel_size=5,
+            stride=1,
+            padding="SAME",
+            scope="{}_conv1".format(scope)
+        )
+
+        return layers.conv2d(
+            conv1,
+            num_outputs=32,
+            kernel_size=3,
+            stride=1,
+            padding="SAME",
+            scope="{}_conv2".format(scope)
+        )

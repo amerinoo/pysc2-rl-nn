@@ -1,3 +1,4 @@
+import csv
 import time
 import threading
 
@@ -5,33 +6,31 @@ from tensorflow import logging, errors
 from absl import flags
 
 EPISODE_LOCK = threading.Lock()
+UPDATE_LOCK = threading.Lock()
 STEP_LOCK = threading.Lock()
+SAVE_LOCK = threading.Lock()
 FLAGS = flags.FLAGS
-SNAPSHOT_PATH = FLAGS.snapshot_path + FLAGS.map + '/' + FLAGS.agent
 
 
 class Runner(object):
     def __init__(self,
+                 config,
                  agent,
                  env,
-                 is_training,
                  global_step_counter,
                  global_episode_counter,
-                 update_period=0,
-                 max_local_steps=0,
-                 max_global_steps=0,
-                 max_global_episodes=0,
                  saver=None):
 
         self.agent = agent
         self.env = env
-        self.is_training = is_training
-        self.update_period = update_period
+        self.config = config
+        self.is_training = config.training
+        self.update_period = config.max_update_steps
         self.global_step_counter = global_step_counter
         self.global_episode_counter = global_episode_counter
-        self.max_local_steps = max_local_steps
-        self.max_global_steps = max_global_steps
-        self.max_global_episodes = max_global_episodes
+        self.max_local_steps = config.max_steps
+        self.max_global_steps = config.max_global_steps
+        self.max_global_episodes = config.num_episodes
         self.saver = saver
 
         self.timestep = None
@@ -54,7 +53,6 @@ class Runner(object):
             self.start_time = time.time()
 
         replay_buffer = []
-
         try:
             # If starting new episode, reset agent and environment
             if self.is_first_step:
@@ -103,7 +101,7 @@ class Runner(object):
 
             try:
                 while not coord.should_stop():
-                    # Copy parameters from the global networks
+                    # Copy parameters from the global network
                     self.agent.session.run(self.agent.copy_params_op)
 
                     # Collect some experience
@@ -114,14 +112,27 @@ class Runner(object):
                             if is_done:
                                 with EPISODE_LOCK:
                                     global_episode = next(self.global_episode_counter)
+                                    obs = replay_buffer[-1][1].observation
+                                    score = obs["score_cumulative"][0]
+                                    self.log_episode(global_episode, score)
+
                                 logging.info(
                                     "{} - Finished global episode: {}".format(self.agent.name, global_episode))
 
                                 if FLAGS.save_replay:
                                     self.env.save_replay(self.agent.name)
 
-                            if self.saver is not None and global_episode % FLAGS.snapshot_step == 0:
-                                self.saver.save(self.agent.session, SNAPSHOT_PATH + '/model.pkl', global_episode)
+                            if self.saver is not None and \
+                                    (global_episode % FLAGS.snapshot_step == 0
+                                     or global_episode == 500
+                                     or global_episode == 1000
+                                     or global_episode == 1500
+                                     or global_episode == 2000
+                                     or global_episode == 2500
+                                     or global_episode == 3000):
+                                with SAVE_LOCK:
+                                    self.saver.save(self.agent.session, self.config.snapshot_path + '/model.pkl', global_episode)
+
                             # If global max steps reached or global max episodes reached, terminate session
                             if self.max_global_steps != 0 and global_step >= self.max_global_steps:
                                 logging.info("Reached max global step {}".format(global_step))
@@ -134,10 +145,11 @@ class Runner(object):
                                 coord.request_stop()
                                 return
 
-                        elif is_done:
-                            obs = replay_buffer[-1].observation
-                            score = obs["score_cumulative"][0]
-                            logging.info("Your score is {}!".format(str(score)))
-
             except errors.CancelledError:
                 return
+
+    def log_episode(self, episode, reward):
+        logging.info("Logging reward: %d", reward)
+        with open('rewards.csv', 'a', newline='') as csvfile:
+            w = csv.writer(csvfile, delimiter=',')
+            w.writerow([episode, reward, self.config.learning_rate, self.config.beta, self.config.eta])
